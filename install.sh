@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="vps-vpn"
-# shellcheck disable=SC2034  # consumed by state/config functions added in later tasks
-STATE_DIR="/root/vps-vpn"
+# shellcheck disable=SC2034  # consumed by state/config functions defined below
+STATE_DIR="${STATE_DIR:-/root/vps-vpn}"
 DEFAULT_PORT=443
 
 usage() {
@@ -482,7 +482,7 @@ setup_service() {
 check_port_available() {
     local port="$1" holders
     if command -v lsof >/dev/null 2>&1; then
-        holders=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2)
+        holders=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2 || true)
         if [[ -n "$holders" ]]; then
             if grep -qi 'sing-box' <<<"$holders"; then
                 return 0

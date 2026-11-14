@@ -505,6 +505,56 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     [[ "$output" != *"unbound variable"* ]]
 }
 
+# End-to-end: run install.sh through the REAL `bash install.sh` entry point with
+# stubbed PATH binaries (no sourcing). Proves the actual invocation path works.
+@test "E2E: bash install.sh completes end-to-end with stub tooling" {
+    local root; root=$(mktemp -d)
+    local bin="$root/bin"; mkdir -p "$bin"
+    cat > "$bin/curl" <<'S'
+#!/bin/sh
+case "$*" in
+  *api.ipify.org*|*icanhazip.com*) printf '1.2.3.4' ;;
+  *sing-box.app*) printf '#!/bin/sh\n' ;;
+esac
+S
+    cat > "$bin/sing-box" <<'S'
+#!/bin/sh
+case "$1" in
+  generate) printf 'PrivateKey: PRIVKEYb64urlAAAAAAAAAAAAAAAAAAAAAAAA\nPublicKey: PUBKEYb64urlBBBBBBBBBBBBBBBBBBBBBBBBB\n' ;;
+  check) exit 0 ;;
+esac
+exit 0
+S
+    cat > "$bin/systemctl" <<'S'
+#!/bin/sh
+exit 0
+S
+    cat > "$bin/lsof" <<'S'
+#!/bin/sh
+exit 1
+S
+    cat > "$bin/openssl" <<'S'
+#!/bin/sh
+case "$*" in
+  *"-hex 16"*) printf '0123456789abcdef0123456789abcdef' ;;
+  *) printf 'deadbeef' ;;
+esac
+S
+    chmod +x "$bin"/*
+    local real_bash; real_bash=$(command -v bash)
+    run env -i PATH="$bin:/usr/bin:/bin" STATE_DIR="$root/state" \
+        SING_BOX_CONFIG_PATH="$root/etc/sing-box/config.json" \
+        "$real_bash" "$PROJECT_ROOT/install.sh" --ip 1.2.3.4
+    [ "$status" -eq 0 ]
+    [ -f "$root/state/state.env" ]
+    [ -f "$root/state/client.yaml" ]
+    [ -f "$root/etc/sing-box/config.json" ]
+    [[ "$output" == *"安装完成"* ]]
+    # No placeholders left in either generated config.
+    run grep -l '{{' "$root/state/client.yaml" "$root/etc/sing-box/config.json"
+    [ "$status" -ne 0 ]
+}
+
 # --- C2: single-file install (no external templates needed) -----------------
 @test "C2: generate_server_config works from a lone copy of install.sh" {
     local dir; dir=$(mktemp -d)
