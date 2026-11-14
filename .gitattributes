@@ -1,0 +1,14 @@
+# Keep shell scripts LF in the working tree on every platform so ShellCheck,
+# bats and the real `curl | sudo bash` path all see identical bytes.
+* text=auto eol=lf
+*.sh text eol=lf
+*.bats text eol=lf
+*.template text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+
+# Windows-native helpers, if ever added, keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
