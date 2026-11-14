@@ -117,3 +117,40 @@ _fake_curl() {
     [ -z "$output" ]
 }
 
+# --- Task 3: user context detection -----------------------------------------
+
+@test "detect_user_context resolves SUDO_USER via getent" {
+    getent() { echo "ubuntu:x:1000:1000::/home/ubuntu:/bin/bash"; }
+    SUDO_USER=ubuntu
+    detect_user_context
+    [ "$USER_NAME" = "ubuntu" ]
+    [ "$USER_HOME" = "/home/ubuntu" ]
+    [ "$USER_ID" = "1000" ]
+    [ "$GROUP_ID" = "1000" ]
+}
+
+@test "detect_user_context falls back to root with no SUDO_USER" {
+    unset SUDO_USER
+    detect_user_context
+    [ "$USER_NAME" = "root" ]
+    [ "$USER_HOME" = "/root" ]
+    [ "$USER_ID" = "0" ]
+    [ "$GROUP_ID" = "0" ]
+}
+
+@test "detect_user_context treats SUDO_USER=root as root" {
+    SUDO_USER=root
+    detect_user_context
+    [ "$USER_NAME" = "root" ]
+    [ "$USER_HOME" = "/root" ]
+}
+
+@test "detect_user_context fails when user cannot be resolved" {
+    getent() { return 2; }
+    SUDO_USER=ghost
+    run detect_user_context
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"无法解析用户"* ]]
+}
+
+

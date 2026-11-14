@@ -104,8 +104,32 @@ detect_public_ip() {
     esac
 }
 
+# Resolve the real (non-root) user who invoked sudo. Uses getent so the home
+# directory comes from the system account database, never from path guessing.
+# Populates USER_NAME, USER_HOME, USER_ID, GROUP_ID.
+detect_user_context() {
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local record
+        record=$(getent passwd "$SUDO_USER" 2>/dev/null) || true
+        if [[ -z "$record" ]]; then
+            echo "错误：无法解析用户 $SUDO_USER" >&2
+            return 1
+        fi
+        IFS=: read -r _ _ USER_ID GROUP_ID _ USER_HOME _ <<<"$record"
+        USER_NAME="$SUDO_USER"
+        echo "检测到用户: $USER_NAME (home: $USER_HOME)" >&2
+    else
+        USER_NAME="root"
+        USER_HOME="/root"
+        USER_ID=0
+        GROUP_ID=0
+        echo "检测到用户: $USER_NAME (home: $USER_HOME)" >&2
+    fi
+}
+
 main() {
     parse_args "$@"
+    detect_user_context
 
     if [[ -n "$IP" ]]; then
         PUBLIC_IP="$IP"
