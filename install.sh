@@ -282,6 +282,69 @@ validate_config() {
     fi
 }
 
+# --- client config ----------------------------------------------------------
+
+# Render the Mihomo YAML from the template and, when running as a non-root
+# user, drop a 0600 copy into that user's home. Never emits the REALITY
+# private key. Prints the main config path.
+generate_client_config() {
+    local template="$TEMPLATE_DIR/client.yaml.template"
+    local main_config="$STATE_DIR/client.yaml"
+    local user_config="$USER_HOME/vps-vpn/client.yaml"
+
+    [[ -f "$template" ]] || { echo "错误：缺少模板 $template" >&2; return 1; }
+
+    mkdir -p "$STATE_DIR"
+    local tmp
+    tmp=$(mktemp "$STATE_DIR/.client.yaml.XXXXXX")
+    sed -e "s/{{PUBLIC_IP}}/$PUBLIC_IP/g" \
+        -e "s/{{PORT}}/$PORT/g" \
+        -e "s/{{UUID}}/$UUID/g" \
+        -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
+        -e "s/{{REALITY_PUBLIC_KEY}}/$REALITY_PUBLIC_KEY/g" \
+        -e "s/{{SHORT_ID}}/$SHORT_ID/g" \
+        "$template" > "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$main_config"
+    chmod 600 "$main_config"
+
+    if [[ "$USER_NAME" != "root" ]]; then
+        mkdir -p "$USER_HOME/vps-vpn"
+        chmod 700 "$USER_HOME/vps-vpn"
+        cp "$main_config" "$user_config"
+        chown "$USER_ID:$GROUP_ID" "$user_config" 2>/dev/null || true
+        chmod 600 "$user_config"
+    fi
+
+    echo "$main_config"
+}
+
+# Validate the client YAML with real Mihomo when available (`mihomo -t -f`).
+# Without Mihomo, fall back to a structural check and say so explicitly.
+validate_client_config() {
+    local config_file="$1"
+    if command -v mihomo >/dev/null 2>&1; then
+        if mihomo -t -f "$config_file" >/dev/null 2>&1; then
+            return 0
+        fi
+        echo "错误：客户端配置校验失败（mihomo -t）" >&2
+        return 1
+    fi
+
+    # Fallback: required keys/fields present and no leftover placeholders.
+    local missing=()
+    grep -q '^proxies:' "$config_file" || missing+=("proxies")
+    grep -q 'type: vless' "$config_file" || missing+=("type: vless")
+    grep -q 'reality-opts:' "$config_file" || missing+=("reality-opts")
+    grep -q 'public-key:' "$config_file" || missing+=("public-key")
+    if [[ ${#missing[@]} -gt 0 ]] || grep -q '{{' "$config_file"; then
+        echo "错误：客户端配置校验失败（缺少: ${missing[*]:-占位符未替换}）" >&2
+        return 1
+    fi
+    echo "提示：未找到 mihomo，已用结构检查替代真实兼容性校验" >&2
+    return 0
+}
+
 main() {
     parse_args "$@"
     detect_user_context

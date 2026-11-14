@@ -1,0 +1,37 @@
+proxies:
+  - name: "vps-vpn"
+    type: vless
+    server: {{PUBLIC_IP}}
+    port: {{PORT}}
+    uuid: {{UUID}}
+    flow: xtls-rprx-vision
+    network: tcp
+    tls: true
+    servername: {{REALITY_TARGET}}
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: {{REALITY_PUBLIC_KEY}}
+      short-id: {{SHORT_ID}}
+
+proxy-groups:
+  - name: "Global"
+    type: select
+    proxies:
+      - "vps-vpn"
+
+rules:
+  - "IP-CIDR,127.0.0.0/8,DIRECT"
+  - "IP-CIDR,192.168.0.0/16,DIRECT"
+  - "IP-CIDR,10.0.0.0/8,DIRECT"
+  - "IP-CIDR,172.16.0.0/12,DIRECT"
+  - "MATCH,Global"
+
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+  default-nameserver:
+    - 223.5.5.5
+    - 8.8.8.8
+  nameserver:
+    - https://dns.google/dns-query
+    - https://cloudflare-dns.com/dns-query

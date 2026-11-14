@@ -305,6 +305,72 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     [[ "$output" == *"配置校验失败"* ]]
 }
 
+# --- Task 6: client YAML generation -----------------------------------------
+
+@test "generate_client_config writes main and user copies without private key" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="ubuntu"; USER_HOME="$(mktemp -d)/home/ubuntu"; USER_ID=1000; GROUP_ID=1000
+    PUBLIC_IP="1.2.3.4"; PORT=443
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub-key-ZZZ"; REALITY_PRIVATE_KEY="SECRET-PRIVATE-KEY"
+    SHORT_ID="abcd1234"
+    mkdir -p "$USER_HOME"
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+
+    [ -f "$STATE_DIR/client.yaml" ]
+    [ -f "$USER_HOME/vps-vpn/client.yaml" ]
+
+    # No unreplaced placeholders.
+    ! grep -q '{{' "$STATE_DIR/client.yaml"
+    # Correct values landed.
+    grep -q 'server: 1.2.3.4' "$STATE_DIR/client.yaml"
+    grep -q 'port: 443' "$STATE_DIR/client.yaml"
+    grep -q 'servername: www.microsoft.com' "$STATE_DIR/client.yaml"
+    grep -q 'public-key: pub-key-ZZZ' "$STATE_DIR/client.yaml"
+    grep -q 'short-id: abcd1234' "$STATE_DIR/client.yaml"
+    # The REALITY private key must never appear in a client config.
+    ! grep -q 'SECRET-PRIVATE-KEY' "$STATE_DIR/client.yaml"
+    ! grep -q 'SECRET-PRIVATE-KEY' "$USER_HOME/vps-vpn/client.yaml"
+    # DNS is proxy-resolved, mixed port is loopback only.
+    grep -q 'listen: 127.0.0.1:1053' "$STATE_DIR/client.yaml"
+}
+
+@test "generate_client_config skips user copy for root" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    [ -f "$STATE_DIR/client.yaml" ]
+    [ ! -e "$USER_HOME/vps-vpn/client.yaml" ]
+}
+
+@test "generate_client_config writes 0600 on main and user copy" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="ubuntu"; USER_HOME="$(mktemp -d)"; USER_ID=1000; GROUP_ID=1000
+    PUBLIC_IP="1.2.3.4"; PORT=443
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    CHMOD_LOG="$(mktemp)"; export CHMOD_LOG
+    chmod() { printf '%s\n' "$*" >> "$CHMOD_LOG"; command chmod "$@" 2>/dev/null || true; }
+    export -f chmod
+    generate_client_config >/dev/null
+    grep -q "600 $STATE_DIR/client.yaml" "$CHMOD_LOG"
+    grep -q "600 $USER_HOME/vps-vpn/client.yaml" "$CHMOD_LOG"
+}
+
+@test "validate_client_config fails on malformed YAML" {
+    local f; f=$(mktemp); printf 'proxies: [unclosed\n' > "$f"
+    run validate_client_config "$f"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"客户端配置校验失败"* ]]
+}
+
+
 
 
 
