@@ -370,6 +370,49 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     [[ "$output" == *"客户端配置校验失败"* ]]
 }
 
+# --- Task 7: sing-box install and systemd service ---------------------------
+
+@test "setup_service copies config and reports started" {
+    local dir; dir=$(mktemp -d)
+    SING_BOX_CONFIG_PATH="$dir/etc/sing-box/config.json"
+    local cfg; cfg=$(mktemp); echo '{}' > "$cfg"
+    systemctl() { return 0; }; export -f systemctl
+    run setup_service "$cfg"
+    [ "$status" -eq 0 ]
+    [ -f "$SING_BOX_CONFIG_PATH" ]
+    [[ "$output" == *"服务已启动"* ]]
+}
+
+@test "setup_service fails when service is not active" {
+    local dir; dir=$(mktemp -d)
+    SING_BOX_CONFIG_PATH="$dir/config.json"
+    local cfg; cfg=$(mktemp); echo '{}' > "$cfg"
+    systemctl() { if [[ "$1" == "is-active" ]]; then return 3; fi; return 0; }
+    export -f systemctl
+    run setup_service "$cfg"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"服务启动失败"* ]]
+}
+
+@test "install_sing_box skips when already installed" {
+    sing-box() { return 0; }; export -f sing-box
+    run install_sing_box
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"已安装"* ]]
+}
+
+@test "install_sing_box installs pinned version via official script" {
+    CAP="$(mktemp)"; export CAP
+    curl() { printf 'curl %s\n' "$*" >> "$CAP"; }
+    bash() { printf 'bash %s\n' "$*" >> "$CAP"; cat >/dev/null; }
+    export -f curl bash
+    run install_sing_box
+    [ "$status" -eq 0 ]
+    grep -q 'curl .*sing-box.app' "$CAP"
+    grep -q 'bash .*--version 1.10.0' "$CAP"
+}
+
+
 
 
 

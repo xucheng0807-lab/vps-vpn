@@ -345,6 +345,52 @@ validate_client_config() {
     return 0
 }
 
+# --- install & service ------------------------------------------------------
+
+readonly SING_BOX_VERSION="1.10.0"
+# System config path; overridable for tests, real path used on a VPS.
+SING_BOX_CONFIG_PATH="${SING_BOX_CONFIG_PATH:-/etc/sing-box/config.json}"
+
+install_sing_box() {
+    if command -v sing-box >/dev/null 2>&1; then
+        echo "sing-box 已安装，跳过安装步骤" >&2
+        return 0
+    fi
+    echo "安装 sing-box v$SING_BOX_VERSION..." >&2
+    curl -fsSL https://sing-box.app/install.sh | bash -s -- --version "$SING_BOX_VERSION"
+}
+
+# Install the vetted config and (re)start the systemd unit. Non-zero when the
+# unit does not become active; prints status for diagnosis.
+setup_service() {
+    local config_file="$1"
+    mkdir -p "$(dirname "$SING_BOX_CONFIG_PATH")"
+    cp "$config_file" "$SING_BOX_CONFIG_PATH"
+    chmod 600 "$SING_BOX_CONFIG_PATH"
+
+    systemctl enable --now sing-box >/dev/null 2>&1 || true
+
+    if ! systemctl is-active --quiet sing-box; then
+        echo "错误：sing-box 服务启动失败" >&2
+        systemctl status sing-box --no-pager >&2 || true
+        return 1
+    fi
+    echo "sing-box 服务已启动" >&2
+}
+
+# Best-effort listening-port check. Advisory only: proves the unit bound the
+# port locally, never claims public reachability.
+check_listening() {
+    local port="$1"
+    command -v ss >/dev/null 2>&1 || return 0
+    if ss -ltn 2>/dev/null | grep -q ":$port "; then
+        echo "TCP $port 正在监听" >&2
+    else
+        echo "警告：未检测到 TCP $port 监听，请检查服务日志" >&2
+    fi
+    return 0
+}
+
 main() {
     parse_args "$@"
     detect_user_context
