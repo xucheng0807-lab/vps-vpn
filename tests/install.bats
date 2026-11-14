@@ -444,7 +444,6 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
 }
 
 # --- Task 8 (integration): main rolls back on service start failure ---------
-
 @test "main restores the previous config when the new service fails to start" {
     local root; root=$(mktemp -d)
     STATE_DIR="$root/state"; SING_BOX_CONFIG_PATH="$root/etc/sing-box/config.json"
@@ -461,6 +460,32 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     # Old config content restored over the system path.
     grep -q '"old":true' "$SING_BOX_CONFIG_PATH"
 }
+
+# --- Task 9: installation summary ------------------------------------------
+
+@test "print_summary shows endpoint, paths and scp for a sudo user" {
+    USER_NAME="ubuntu"; PUBLIC_IP="1.2.3.4"; PORT=443
+    run print_summary "/root/vps-vpn/client.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"安装完成"* ]]
+    [[ "$output" == *"公网地址: 1.2.3.4"* ]]
+    [[ "$output" == *"scp ubuntu@1.2.3.4:/home/ubuntu/vps-vpn/client.yaml ."* ]]
+}
+
+@test "print_summary uses root paths for the root user" {
+    USER_NAME="root"; PUBLIC_IP="5.6.7.8"; PORT=8443
+    run print_summary "/root/vps-vpn/client.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"scp root@5.6.7.8:/root/vps-vpn/client.yaml ."* ]]
+}
+
+@test "print_summary never leaks the private key" {
+    USER_NAME="ubuntu"; PUBLIC_IP="1.2.3.4"; PORT=443
+    REALITY_PRIVATE_KEY="TOP-SECRET"
+    run print_summary "/root/vps-vpn/client.yaml"
+    [[ "$output" != *"TOP-SECRET"* ]]
+}
+
 
 
 

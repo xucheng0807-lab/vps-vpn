@@ -434,6 +434,64 @@ restore_config() {
     return 1
 }
 
+# --- summary ----------------------------------------------------------------
+
+# Human-readable completion summary. Emits paths, endpoint, download command
+# and service commands — never UUID, keys or full YAML.
+print_summary() {
+    local client_config="$1"
+
+    cat <<EOF
+
+========================================
+安装完成！
+========================================
+
+公网地址: $PUBLIC_IP
+端口: $PORT
+服务端配置: $SING_BOX_CONFIG_PATH
+客户端配置: $client_config
+
+下载客户端配置到本地电脑：
+EOF
+
+    if [[ "$USER_NAME" != "root" ]]; then
+        cat <<EOF
+  scp $USER_NAME@$PUBLIC_IP:/home/$USER_NAME/vps-vpn/client.yaml .
+
+或使用 SSH 密钥：
+  scp -i /path/to/key.pem $USER_NAME@$PUBLIC_IP:/home/$USER_NAME/vps-vpn/client.yaml .
+EOF
+    else
+        cat <<EOF
+  scp root@$PUBLIC_IP:/root/vps-vpn/client.yaml .
+
+或使用 SSH 密钥：
+  scp -i /path/to/key.pem root@$PUBLIC_IP:/root/vps-vpn/client.yaml .
+EOF
+    fi
+
+    cat <<EOF
+
+导入到 Clash Verge 或 CMFA 即可使用。
+EOF
+
+    if [[ "${IP_DETECT_SINGLE:-0}" -eq 1 ]]; then
+        echo "提示：公网 IP 仅由单个服务确认，请自行核验为 $PUBLIC_IP"
+    fi
+
+    cat <<EOF
+
+服务管理命令：
+  启动: sudo systemctl start sing-box
+  停止: sudo systemctl stop sing-box
+  重启: sudo systemctl restart sing-box
+  查看日志: sudo journalctl -u sing-box -f
+
+========================================
+EOF
+}
+
 main() {
     parse_args "$@"
     detect_user_context
@@ -473,6 +531,17 @@ main() {
     fi
 
     check_listening "$PORT"
+
+    install_sing_box
+
+    local client_config
+    client_config=$(generate_client_config)
+
+    if ! validate_client_config "$client_config"; then
+        echo "警告：客户端配置未通过校验，请检查" >&2
+    fi
+
+    print_summary "$client_config"
 }
 
 # Only run when executed directly; sourcing the file (tests) must not install.
