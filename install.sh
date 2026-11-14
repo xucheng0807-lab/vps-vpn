@@ -26,11 +26,19 @@ parse_args() {
         case "$1" in
             --ip)
                 [[ $# -ge 2 ]] || { echo "错误：--ip 需要一个参数" >&2; usage 2; }
+                if ! is_valid_public_ipv4 "$2"; then
+                    echo "错误：--ip 不是合法的公网 IPv4 地址: $2" >&2
+                    usage 2
+                fi
                 IP="$2"
                 shift 2
                 ;;
             --port)
                 [[ $# -ge 2 ]] || { echo "错误：--port 需要一个参数" >&2; usage 2; }
+                if ! [[ "$2" =~ ^[0-9]+$ ]] || (( 10#$2 < 1 || 10#$2 > 65535 )); then
+                    echo "错误：--port 必须是 1-65535 之间的端口号: $2" >&2
+                    usage 2
+                fi
                 PORT="$2"
                 PORT_EXPLICIT=1
                 shift 2
@@ -71,9 +79,9 @@ is_valid_public_ipv4() {
     return 0
 }
 
-# Detect the public IPv4 address. Prints the chosen address on stdout.
-# Sets IP_DETECT_SINGLE=1 when only one service answered (caller should
-# surface a verification hint). Returns non-zero when undetectable/ambiguous.
+# Detect the public IPv4 and set PUBLIC_IP (global; not run in a subshell so
+# IP_DETECT_SINGLE survives for the summary hint). Returns non-zero when
+# undetectable/ambiguous.
 detect_public_ip() {
     local services=("https://api.ipify.org" "https://icanhazip.com" "https://ifconfig.me/ip")
     local results=() uniq=()
@@ -99,7 +107,7 @@ detect_public_ip() {
         0) return 1 ;;
         1)
             [[ ${#results[@]} -lt 2 ]] && IP_DETECT_SINGLE=1
-            echo "${uniq[0]}"
+            PUBLIC_IP="${uniq[0]}"
             return 0
             ;;
         *) return 1 ;;
@@ -146,25 +154,32 @@ gen_uuid() {
     fi
 }
 
-# Parse `sing-box generate reality-keypair` output (accepts "PrivateKey: x",
-# "Private key: x", or bare base64 lines) into REALITY_PRIVATE_KEY/PUBLIC_KEY.
+# Parse `sing-box generate reality-keypair` output into REALITY_PRIVATE_KEY/
+# REALITY_PUBLIC_KEY. Accepts "PrivateKey: x" / "Private key: x" (case &
+# spacing insensitive) and bare base64 lines.
 parse_keypair() {
-    local out="$1" priv="" pub="" line
+    local out="$1" line lower val
     while IFS= read -r line; do
-        case "$line" in
-            *[Pp]rivate*"key"*) priv="${line##*: }"; priv="${priv// /}" ;;
-            *[Pp]ublic*"key"*)  pub="${line##*: }";  pub="${pub// /}" ;;
-        esac
+        lower="${line,,}"                       # lowercase for matching
+        if [[ "$lower" == *private* ]]; then
+            val="${line#*: }"
+            [[ "$val" == "$line" ]] && val="${line#*:}"
+            REALITY_PRIVATE_KEY="${val//[[:space:]]/}"
+        elif [[ "$lower" == *public* ]]; then
+            val="${line#*: }"
+            [[ "$val" == "$line" ]] && val="${line#*:}"
+            REALITY_PUBLIC_KEY="${val//[[:space:]]/}"
+        fi
     done <<<"$out"
-    if [[ -z "$priv" || -z "$pub" ]]; then
+
+    if [[ -z "${REALITY_PRIVATE_KEY:-}" || -z "${REALITY_PUBLIC_KEY:-}" ]]; then
         local -a lines=()
         mapfile -t lines <<<"$out"
-        priv="${lines[0]:-}"; pub="${lines[1]:-}"
-        priv="${priv// /}"; pub="${pub// /}"
+        REALITY_PRIVATE_KEY="${lines[0]:-}"; REALITY_PUBLIC_KEY="${lines[1]:-}"
+        REALITY_PRIVATE_KEY="${REALITY_PRIVATE_KEY//[[:space:]]/}"
+        REALITY_PUBLIC_KEY="${REALITY_PUBLIC_KEY//[[:space:]]/}"
     fi
-    [[ -n "$priv" && -n "$pub" ]] || return 1
-    REALITY_PRIVATE_KEY="$priv"
-    REALITY_PUBLIC_KEY="$pub"
+    [[ -n "${REALITY_PRIVATE_KEY:-}" && -n "${REALITY_PUBLIC_KEY:-}" ]] || return 1
 }
 
 generate_credentials() {
@@ -174,6 +189,9 @@ generate_credentials() {
         # Reuse the stored port unless the operator explicitly overrode it.
         if [[ "${PORT_EXPLICIT:-0}" -eq 0 && -n "${STATE_PORT:-}" ]]; then
             PORT="$STATE_PORT"
+        elif [[ "${PORT_EXPLICIT:-0}" -eq 1 && "${STATE_PORT:-}" != "$PORT" ]]; then
+            # Explicit new port differs from state: persist it (M1).
+            save_state
         fi
         return 0
     fi
@@ -247,27 +265,64 @@ save_state() {
 # --- server config ----------------------------------------------------------
 
 readonly REALITY_TARGET="www.microsoft.com"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly TEMPLATE_DIR="$SCRIPT_DIR/templates"
 
-# Render the server JSON from the template. Dynamic values are already format-
-# validated upstream (UUID, hex short id, numeric port); they contain no chars
-# that sed's replacement or JSON would misinterpret. Prints the file path.
+# Embedded server template (single-file install: no external files fetched).
+server_template() {
+    cat <<'JSON'
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "::",
+      "listen_port": {{PORT}},
+      "users": [
+        {
+          "uuid": "{{UUID}}",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "{{REALITY_TARGET}}",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "{{REALITY_TARGET}}",
+            "server_port": 443
+          },
+          "private_key": "{{REALITY_PRIVATE_KEY}}",
+          "short_id": ["{{SHORT_ID}}"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct"
+    }
+  ]
+}
+JSON
+}
+
+# Render the server JSON from the embedded template. Dynamic values are already
+# format-validated upstream; they contain no chars JSON would misinterpret.
+# Prints the file path.
 generate_server_config() {
     local config_file="$STATE_DIR/sing-box-server.json"
-    local template="$TEMPLATE_DIR/server.json.template"
-
-    [[ -f "$template" ]] || { echo "错误：缺少模板 $template" >&2; return 1; }
 
     mkdir -p "$STATE_DIR"
     local tmp
     tmp=$(mktemp "$STATE_DIR/.server.json.XXXXXX")
-    sed -e "s/{{PORT}}/$PORT/g" \
+    server_template | sed -e "s/{{PORT}}/$PORT/g" \
         -e "s/{{UUID}}/$UUID/g" \
         -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
         -e "s/{{REALITY_PRIVATE_KEY}}/$REALITY_PRIVATE_KEY/g" \
-        -e "s/{{SHORT_ID}}/$SHORT_ID/g" \
-        "$template" > "$tmp"
+        -e "s/{{SHORT_ID}}/$SHORT_ID/g" > "$tmp"
     chmod 600 "$tmp"
     mv -f "$tmp" "$config_file"
     chmod 600 "$config_file"
@@ -285,26 +340,65 @@ validate_config() {
 
 # --- client config ----------------------------------------------------------
 
-# Render the Mihomo YAML from the template and, when running as a non-root
-# user, drop a 0600 copy into that user's home. Never emits the REALITY
-# private key. Prints the main config path.
+# Embedded Mihomo client template (single-file install).
+client_template() {
+    cat <<'YAML'
+proxies:
+  - name: "vps-vpn"
+    type: vless
+    server: {{PUBLIC_IP}}
+    port: {{PORT}}
+    uuid: {{UUID}}
+    flow: xtls-rprx-vision
+    network: tcp
+    tls: true
+    servername: {{REALITY_TARGET}}
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: {{REALITY_PUBLIC_KEY}}
+      short-id: {{SHORT_ID}}
+
+proxy-groups:
+  - name: "Global"
+    type: select
+    proxies:
+      - "vps-vpn"
+
+rules:
+  - "IP-CIDR,127.0.0.0/8,DIRECT"
+  - "IP-CIDR,192.168.0.0/16,DIRECT"
+  - "IP-CIDR,10.0.0.0/8,DIRECT"
+  - "IP-CIDR,172.16.0.0/12,DIRECT"
+  - "MATCH,Global"
+
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+  default-nameserver:
+    - 223.5.5.5
+    - 8.8.8.8
+  nameserver:
+    - https://dns.google/dns-query
+    - https://cloudflare-dns.com/dns-query
+YAML
+}
+
+# Render the Mihomo YAML from the embedded template and, when running as a
+# non-root user, drop a 0600 copy into that user's home. Never emits the
+# REALITY private key. Prints the main config path.
 generate_client_config() {
-    local template="$TEMPLATE_DIR/client.yaml.template"
     local main_config="$STATE_DIR/client.yaml"
     local user_config="$USER_HOME/vps-vpn/client.yaml"
-
-    [[ -f "$template" ]] || { echo "错误：缺少模板 $template" >&2; return 1; }
 
     mkdir -p "$STATE_DIR"
     local tmp
     tmp=$(mktemp "$STATE_DIR/.client.yaml.XXXXXX")
-    sed -e "s/{{PUBLIC_IP}}/$PUBLIC_IP/g" \
+    client_template | sed -e "s/{{PUBLIC_IP}}/$PUBLIC_IP/g" \
         -e "s/{{PORT}}/$PORT/g" \
         -e "s/{{UUID}}/$UUID/g" \
         -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
         -e "s/{{REALITY_PUBLIC_KEY}}/$REALITY_PUBLIC_KEY/g" \
-        -e "s/{{SHORT_ID}}/$SHORT_ID/g" \
-        "$template" > "$tmp"
+        -e "s/{{SHORT_ID}}/$SHORT_ID/g" > "$tmp"
     chmod 600 "$tmp"
     mv -f "$tmp" "$main_config"
     chmod 600 "$main_config"
@@ -361,15 +455,18 @@ install_sing_box() {
     curl -fsSL https://sing-box.app/install.sh | bash -s -- --version "$SING_BOX_VERSION"
 }
 
-# Install the vetted config and (re)start the systemd unit. Non-zero when the
-# unit does not become active; prints status for diagnosis.
+# Install the vetted config and (re)start the systemd unit. `enable` persists
+# across reboots; `restart` guarantees a running unit actually reloads the new
+# config (enable --now does not restart an already-active unit). Non-zero when
+# the unit does not become active.
 setup_service() {
     local config_file="$1"
     mkdir -p "$(dirname "$SING_BOX_CONFIG_PATH")"
     cp "$config_file" "$SING_BOX_CONFIG_PATH"
     chmod 600 "$SING_BOX_CONFIG_PATH"
 
-    systemctl enable --now sing-box >/dev/null 2>&1 || true
+    systemctl enable sing-box >/dev/null 2>&1 || true
+    systemctl restart sing-box >/dev/null 2>&1 || true
 
     if ! systemctl is-active --quiet sing-box; then
         echo "错误：sing-box 服务启动失败" >&2
@@ -377,6 +474,31 @@ setup_service() {
         return 1
     fi
     echo "sing-box 服务已启动" >&2
+}
+
+# Refuse to proceed when another process already owns the port. A listener
+# whose process is sing-box itself is fine (re-run). Advisory if neither
+# lsof nor ss is available.
+check_port_available() {
+    local port="$1" holders
+    if command -v lsof >/dev/null 2>&1; then
+        holders=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2)
+        if [[ -n "$holders" ]]; then
+            if grep -qi 'sing-box' <<<"$holders"; then
+                return 0
+            fi
+            echo "错误：端口 $port 已被占用，请用 --port 指定其他端口" >&2
+            echo "$holders" >&2
+            return 1
+        fi
+        return 0
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn 2>/dev/null | grep -q ":$port "; then
+            echo "警告：检测到端口 $port 已被监听，若非本项目服务请改用 --port" >&2
+        fi
+    fi
+    return 0
 }
 
 # Best-effort listening-port check. Advisory only: proves the unit bound the
@@ -498,18 +620,22 @@ main() {
 
     if [[ -n "$IP" ]]; then
         PUBLIC_IP="$IP"
-    elif ! PUBLIC_IP=$(detect_public_ip); then
+    elif ! detect_public_ip; then
         echo "错误：无法自动检测公网 IP，请使用 --ip 参数手动指定" >&2
         exit 1
     fi
 
     echo "使用公网 IP: $PUBLIC_IP"
 
-    generate_credentials
-
     if [[ "${IPTEST:-0}" -eq 1 ]]; then
-        return 0  # test seam: stop after IP+user+credentials
+        return 0  # test seam: stop after IP+user detection
     fi
+
+    # sing-box must exist before we can generate keys or check configs.
+    install_sing_box
+
+    check_port_available "$PORT"
+    generate_credentials
 
     local new_config
     new_config=$(generate_server_config)
@@ -532,8 +658,6 @@ main() {
 
     check_listening "$PORT"
 
-    install_sing_box
-
     local client_config
     client_config=$(generate_client_config)
 
@@ -544,7 +668,8 @@ main() {
     print_summary "$client_config"
 }
 
-# Only run when executed directly; sourcing the file (tests) must not install.
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Only run when executed directly. When piped to `bash` BASH_SOURCE[0] is empty
+# and $0 is "bash", so guard on emptiness too (otherwise `curl | bash` no-ops).
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi

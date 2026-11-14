@@ -64,17 +64,17 @@ _fake_curl() {
 @test "detect_public_ip accepts two matching valid results" {
     _fake_curl
     FAKE_CURL_IPIFY="1.2.3.4"; FAKE_CURL_ICANHAZ="1.2.3.4"; FAKE_CURL_IFCONFIG=""
-    run detect_public_ip
-    [ "$status" -eq 0 ]
-    [ "$output" = "1.2.3.4" ]
+    detect_public_ip
+    [ $? -eq 0 ]
+    [ "$PUBLIC_IP" = "1.2.3.4" ]
 }
 
 @test "detect_public_ip accepts single valid result with warning" {
     _fake_curl
     FAKE_CURL_IPIFY="1.2.3.4"; FAKE_CURL_ICANHAZ=""; FAKE_CURL_IFCONFIG=""
-    run detect_public_ip
-    [ "$status" -eq 0 ]
-    [ "$output" = "1.2.3.4" ]
+    detect_public_ip
+    [ $? -eq 0 ]
+    [ "$PUBLIC_IP" = "1.2.3.4" ]
 }
 
 @test "detect_public_ip rejects private address" {
@@ -82,7 +82,7 @@ _fake_curl() {
     FAKE_CURL_IPIFY="192.168.1.1"; FAKE_CURL_ICANHAZ="192.168.1.1"; FAKE_CURL_IFCONFIG=""
     run detect_public_ip
     [ "$status" -eq 1 ]
-    [ -z "$output" ]
+    [ -z "${PUBLIC_IP:-}" ]
 }
 
 @test "detect_public_ip rejects reserved address" {
@@ -90,7 +90,7 @@ _fake_curl() {
     FAKE_CURL_IPIFY="127.0.0.1"; FAKE_CURL_ICANHAZ="169.254.1.1"; FAKE_CURL_IFCONFIG=""
     run detect_public_ip
     [ "$status" -eq 1 ]
-    [ -z "$output" ]
+    [ -z "${PUBLIC_IP:-}" ]
 }
 
 @test "detect_public_ip rejects non-IPv4 text" {
@@ -98,7 +98,7 @@ _fake_curl() {
     FAKE_CURL_IPIFY="not-an-ip"; FAKE_CURL_ICANHAZ="1.2.3.4.5"; FAKE_CURL_IFCONFIG=""
     run detect_public_ip
     [ "$status" -eq 1 ]
-    [ -z "$output" ]
+    [ -z "${PUBLIC_IP:-}" ]
 }
 
 @test "detect_public_ip fails on conflicting results" {
@@ -106,7 +106,7 @@ _fake_curl() {
     FAKE_CURL_IPIFY="1.2.3.4"; FAKE_CURL_ICANHAZ="5.6.7.8"; FAKE_CURL_IFCONFIG=""
     run detect_public_ip
     [ "$status" -eq 1 ]
-    [ -z "$output" ]
+    [ -z "${PUBLIC_IP:-}" ]
 }
 
 @test "detect_public_ip fails when all services fail" {
@@ -114,7 +114,7 @@ _fake_curl() {
     FAKE_CURL_IPIFY=""; FAKE_CURL_ICANHAZ=""; FAKE_CURL_IFCONFIG=""
     run detect_public_ip
     [ "$status" -eq 1 ]
-    [ -z "$output" ]
+    [ -z "${PUBLIC_IP:-}" ]
 }
 
 # --- Task 3: user context detection -----------------------------------------
@@ -453,7 +453,8 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     # sing-box present + passes check; service start fails; restart succeeds.
     sing-box() { return 0; }
     systemctl() { [[ "$1" == "is-active" ]] && return 3; return 0; }
-    export -f sing-box systemctl
+    lsof() { return 1; }
+    export -f sing-box systemctl lsof
 
     run main --ip 1.2.3.4
     [ "$status" -ne 0 ]
@@ -485,6 +486,166 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     run print_summary "/root/vps-vpn/client.yaml"
     [[ "$output" != *"TOP-SECRET"* ]]
 }
+
+# ===========================================================================
+# Final-review fix pass (C1..C4, I1..I4, M1)
+# ===========================================================================
+
+# --- C1: works when piped to bash (BASH_SOURCE[0] is empty) -----------------
+@test "C1: --help works when piped through bash" {
+    run bash -c "cat '$PROJECT_ROOT/install.sh' | bash -s -- --help"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Usage:"* ]]
+}
+
+@test "C1: an unknown flag through a pipe prints usage and does not crash" {
+    run bash -c "cat '$PROJECT_ROOT/install.sh' | bash -s -- --bogus"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"未知参数"* ]]
+    [[ "$output" != *"unbound variable"* ]]
+}
+
+# --- C2: single-file install (no external templates needed) -----------------
+@test "C2: generate_server_config works from a lone copy of install.sh" {
+    local dir; dir=$(mktemp -d)
+    cp "$PROJECT_ROOT/install.sh" "$dir/install.sh"
+    # Run in a clean bash so there is no second `source` into this test process
+    # (real single-file install sources the file exactly once).
+    run bash -c "
+        set -Eeuo pipefail
+        source '$dir/install.sh'
+        STATE_DIR='$dir/state'
+        PORT=443; UUID='11111111-2222-3333-4444-555555555555'
+        REALITY_PRIVATE_KEY='k'; SHORT_ID='abcd1234'
+        f=\$(generate_server_config)
+        [ -f \"\$f\" ] || { echo MISSING; exit 1; }
+        if grep -q '{{' \"\$f\"; then echo PLACEHOLDER; exit 1; fi
+        echo OK
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+# --- C3: install_sing_box ordering inside main ------------------------------
+@test "C3: main calls install_sing_box before generate_credentials" {
+    local install_line cred_line
+    install_line=$(grep -n '^[^#]*install_sing_box$' "$PROJECT_ROOT/install.sh" | head -1 | cut -d: -f1)
+    cred_line=$(grep -n '^[^#]*generate_credentials$' "$PROJECT_ROOT/install.sh" | head -1 | cut -d: -f1)
+    [ -n "$install_line" ] && [ -n "$cred_line" ]
+    [ "$install_line" -lt "$cred_line" ]
+}
+
+# --- C4: parse real keypair output format -----------------------------------
+@test "C4: parse_keypair strips PrivateKey:/PublicKey: labels without spaces" {
+    parse_keypair "PrivateKey: aB3dE9kLmN0PqRsTuVwXyZ1234567890_abcdEFGH
+PublicKey: ZyXwVuTsRqPoNmLkJiHgFeDcBa0987654321-zyxwVUTS"
+    [ "$REALITY_PRIVATE_KEY" = "aB3dE9kLmN0PqRsTuVwXyZ1234567890_abcdEFGH" ]
+    [ "$REALITY_PUBLIC_KEY" = "ZyXwVuTsRqPoNmLkJiHgFeDcBa0987654321-zyxwVUTS" ]
+}
+
+@test "C4: parse_keypair also handles 'Private key:' with a space" {
+    parse_keypair "Private key: priv-xyz
+Public key: pub-xyz"
+    [ "$REALITY_PRIVATE_KEY" = "priv-xyz" ]
+    [ "$REALITY_PUBLIC_KEY" = "pub-xyz" ]
+}
+
+# --- I1: argument validation -----------------------------------------------
+@test "I1: --ip rejects private address" {
+    run parse_args --ip 192.168.1.1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"无效"* || "$output" == *"合法"* || "$output" == *"公网"* ]]
+}
+
+@test "I1: --ip rejects malformed address" {
+    run parse_args --ip not_an_ip
+    [ "$status" -ne 0 ]
+}
+
+@test "I1: --port rejects non-numeric" {
+    run parse_args --port abc
+    [ "$status" -ne 0 ]
+}
+
+@test "I1: --port rejects out-of-range" {
+    run parse_args --port 99999
+    [ "$status" -ne 0 ]
+}
+
+@test "I1: --port rejects zero" {
+    run parse_args --port 0
+    [ "$status" -ne 0 ]
+}
+
+# --- I2: port occupancy pre-check ------------------------------------------
+@test "I2: check_port_available fails when port is held by another process" {
+    lsof() {
+        if [[ "$*" == *":8443"* ]]; then
+            printf 'COMMAND PID\nnginx 123\n'; return 0
+        fi
+        return 1
+    }
+    ss() { return 1; }
+    export -f lsof ss
+    run check_port_available 8443
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"占用"* ]]
+}
+
+@test "I2: check_port_available passes when port is free" {
+    lsof() { return 1; }
+    ss() { return 1; }
+    export -f lsof ss
+    run check_port_available 8443
+    [ "$status" -eq 0 ]
+}
+
+@test "I2: check_port_available allows a port owned only by sing-box" {
+    lsof() { printf 'COMMAND PID\nsing-box 999\n'; return 0; }
+    export -f lsof
+    run check_port_available 8443
+    [ "$status" -eq 0 ]
+}
+
+# --- I3: setup_service restarts a running unit -----------------------------
+@test "I3: setup_service restarts the service after writing config" {
+    local dir; dir=$(mktemp -d)
+    SING_BOX_CONFIG_PATH="$dir/config.json"
+    local cfg; cfg=$(mktemp); echo '{}' > "$cfg"
+    SYSLOG="$(mktemp)"; export SYSLOG
+    systemctl() { printf '%s\n' "$*" >> "$SYSLOG"; [[ "$1" == "is-active" ]] && return 0; return 0; }
+    export -f systemctl
+    setup_service "$cfg" >/dev/null 2>&1
+    grep -q '^restart sing-box' "$SYSLOG"
+}
+
+# --- I4: single-source IP hint survives ------------------------------------
+@test "I4: detect_public_ip sets IP_DETECT_SINGLE globally on single source" {
+    _fake_curl
+    FAKE_CURL_IPIFY="1.2.3.4"; FAKE_CURL_ICANHAZ=""; FAKE_CURL_IFCONFIG=""
+    detect_public_ip >/dev/null
+    [ "$IP_DETECT_SINGLE" -eq 1 ]
+    [ "$PUBLIC_IP" = "1.2.3.4" ]
+}
+
+# --- M1: port change persists to state -------------------------------------
+@test "M1: re-run with a different --port persists the new port" {
+    STATE_DIR="$(mktemp -d)/state"
+    mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+    cat > "$STATE_DIR/state.env" <<'EOF'
+UUID=11111111-2222-3333-4444-555555555555
+REALITY_PRIVATE_KEY=pk
+REALITY_PUBLIC_KEY=pub
+SHORT_ID=abcd1234
+PORT=443
+PUBLIC_IP=9.9.9.9
+EOF
+    chmod 600 "$STATE_DIR/state.env"
+    PORT=8443; PORT_EXPLICIT=1; PUBLIC_IP=9.9.9.9
+    generate_credentials >/dev/null
+    grep -q '^PORT=8443' "$STATE_DIR/state.env"
+}
+
 
 
 
