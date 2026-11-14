@@ -243,5 +243,68 @@ EOF
     [ ! -f /tmp/pwned ]
 }
 
+# --- Task 5: server configuration generation --------------------------------
+
+_json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$1"; }
+
+@test "generate_server_config substitutes all placeholders" {
+    STATE_DIR="$(mktemp -d)"
+    PORT=443; UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PRIVATE_KEY="priv-key-XYZ"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_server_config >/dev/null
+    local f="$STATE_DIR/sing-box-server.json"
+    [ -f "$f" ]
+    run _json_ok "$f"
+    [ "$status" -eq 0 ]
+    ! grep -q '{{' "$f"
+    grep -q '"private_key": "priv-key-XYZ"' "$f"
+    grep -q '"short_id": \["abcd1234"\]' "$f"
+    grep -q '"uuid": "11111111-2222-3333-4444-555555555555"' "$f"
+    grep -q '"listen_port": 443' "$f"
+    grep -q '"flow": "xtls-rprx-vision"' "$f"
+}
+
+@test "generate_server_config uses fixed reality handshake target" {
+    STATE_DIR="$(mktemp -d)"
+    PORT=8443; UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PRIVATE_KEY="k"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_server_config >/dev/null
+    local f="$STATE_DIR/sing-box-server.json"
+    grep -q '"server": "www.microsoft.com"' "$f"
+    grep -q '"server_port": 443' "$f"
+    grep -q '"server_name": "www.microsoft.com"' "$f"
+}
+
+@test "generate_server_config writes 0600" {
+    STATE_DIR="$(mktemp -d)"
+    PORT=443; UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PRIVATE_KEY="k"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    CHMOD_LOG="$(mktemp)"; export CHMOD_LOG
+    chmod() { printf '%s\n' "$*" >> "$CHMOD_LOG"; command chmod "$@" 2>/dev/null || true; }
+    export -f chmod
+    generate_server_config >/dev/null
+    grep -q "600 $STATE_DIR/sing-box-server.json" "$CHMOD_LOG"
+}
+
+@test "validate_config passes when sing-box check succeeds" {
+    sing-box() { return 0; }; export -f sing-box
+    local f; f=$(mktemp); echo '{}' > "$f"
+    run validate_config "$f"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "validate_config fails when sing-box check fails" {
+    sing-box() { return 1; }; export -f sing-box
+    local f; f=$(mktemp); echo '{}' > "$f"
+    run validate_config "$f"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"配置校验失败"* ]]
+}
+
+
 
 

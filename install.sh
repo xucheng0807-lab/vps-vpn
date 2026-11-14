@@ -244,6 +244,44 @@ save_state() {
     chmod 600 "$STATE_DIR/state.env"
 }
 
+# --- server config ----------------------------------------------------------
+
+readonly REALITY_TARGET="www.microsoft.com"
+readonly TEMPLATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates"
+
+# Render the server JSON from the template. Dynamic values are already format-
+# validated upstream (UUID, hex short id, numeric port); they contain no chars
+# that sed's replacement or JSON would misinterpret. Prints the file path.
+generate_server_config() {
+    local config_file="$STATE_DIR/sing-box-server.json"
+    local template="$TEMPLATE_DIR/server.json.template"
+
+    [[ -f "$template" ]] || { echo "错误：缺少模板 $template" >&2; return 1; }
+
+    mkdir -p "$STATE_DIR"
+    local tmp
+    tmp=$(mktemp "$STATE_DIR/.server.json.XXXXXX")
+    sed -e "s/{{PORT}}/$PORT/g" \
+        -e "s/{{UUID}}/$UUID/g" \
+        -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
+        -e "s/{{REALITY_PRIVATE_KEY}}/$REALITY_PRIVATE_KEY/g" \
+        -e "s/{{SHORT_ID}}/$SHORT_ID/g" \
+        "$template" > "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$config_file"
+    chmod 600 "$config_file"
+    echo "$config_file"
+}
+
+# Verify a server config with sing-box. Non-zero with a diagnostic on failure.
+validate_config() {
+    local config_file="$1"
+    if ! sing-box check -c "$config_file" 2>/dev/null; then
+        echo "错误：sing-box 配置校验失败" >&2
+        return 1
+    fi
+}
+
 main() {
     parse_args "$@"
     detect_user_context
@@ -258,6 +296,12 @@ main() {
     echo "使用公网 IP: $PUBLIC_IP"
 
     generate_credentials
+
+    if [[ "${IPTEST:-0}" -eq 1 ]]; then
+        return 0  # test seam: stop after IP+user+credentials
+    fi
+
+    generate_server_config
 }
 
 # Only run when executed directly; sourcing the file (tests) must not install.
