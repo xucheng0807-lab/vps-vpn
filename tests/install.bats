@@ -412,6 +412,58 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     grep -q 'bash .*--version 1.10.0' "$CAP"
 }
 
+# --- Task 8: backup and restore --------------------------------------------
+
+@test "backup_config copies existing config into backups" {
+    STATE_DIR="$(mktemp -d)"
+    local cfg; cfg=$(mktemp); echo '{"a":1}' > "$cfg"
+    backup_config "$cfg" >/dev/null
+    ls "$STATE_DIR"/backups/config.json.* >/dev/null 2>&1
+}
+
+@test "backup_config is a no-op when the file is absent" {
+    STATE_DIR="$(mktemp -d)"
+    run backup_config "/nonexistent/config.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "restore_config restores the latest backup" {
+    STATE_DIR="$(mktemp -d)"
+    local cfg; cfg=$(mktemp); echo '{"v":1}' > "$cfg"
+    backup_config "$cfg" >/dev/null
+    echo '{"v":2}' > "$cfg"
+    restore_config "$cfg" >/dev/null
+    grep -q '"v":1' "$cfg"
+}
+
+@test "restore_config fails when no backup exists" {
+    STATE_DIR="$(mktemp -d)"
+    run restore_config "$STATE_DIR/missing.json"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"找不到可用的备份"* ]]
+}
+
+# --- Task 8 (integration): main rolls back on service start failure ---------
+
+@test "main restores the previous config when the new service fails to start" {
+    local root; root=$(mktemp -d)
+    STATE_DIR="$root/state"; SING_BOX_CONFIG_PATH="$root/etc/sing-box/config.json"
+    mkdir -p "$(dirname "$SING_BOX_CONFIG_PATH")"
+    printf '{"old":true}\n' > "$SING_BOX_CONFIG_PATH"
+
+    # sing-box present + passes check; service start fails; restart succeeds.
+    sing-box() { return 0; }
+    systemctl() { [[ "$1" == "is-active" ]] && return 3; return 0; }
+    export -f sing-box systemctl
+
+    run main --ip 1.2.3.4
+    [ "$status" -ne 0 ]
+    # Old config content restored over the system path.
+    grep -q '"old":true' "$SING_BOX_CONFIG_PATH"
+}
+
+
+
 
 
 

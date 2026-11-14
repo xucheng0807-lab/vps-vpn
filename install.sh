@@ -247,7 +247,8 @@ save_state() {
 # --- server config ----------------------------------------------------------
 
 readonly REALITY_TARGET="www.microsoft.com"
-readonly TEMPLATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly TEMPLATE_DIR="$SCRIPT_DIR/templates"
 
 # Render the server JSON from the template. Dynamic values are already format-
 # validated upstream (UUID, hex short id, numeric port); they contain no chars
@@ -391,6 +392,48 @@ check_listening() {
     return 0
 }
 
+# --- backup & restore -------------------------------------------------------
+
+# Snapshot the config into STATE_DIR/backups (0700 dir, 0600 file). No-op when
+# the file does not exist (first install). Prints the backup path when made.
+backup_config() {
+    local config_file="$1"
+    local backup_dir="$STATE_DIR/backups"
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file
+    backup_file="$backup_dir/config.json.$timestamp"
+
+    [[ -f "$config_file" ]] || return 0
+
+    mkdir -p "$backup_dir"
+    chmod 700 "$backup_dir"
+    cp "$config_file" "$backup_file"
+    chmod 600 "$backup_file"
+    echo "配置已备份到: $backup_file" >&2
+}
+
+# Restore the most recent snapshot onto config_file. Non-zero when none exists.
+restore_config() {
+    local config_file="$1"
+    local backup_dir="$STATE_DIR/backups"
+    local latest_backup="" f
+    # Names carry a sortable timestamp, so the greatest name is the newest.
+    for f in "$backup_dir"/config.json.*; do
+        [[ -f "$f" ]] || continue
+        [[ "$f" > "$latest_backup" ]] && latest_backup="$f"
+    done
+
+    if [[ -n "$latest_backup" ]]; then
+        cp "$latest_backup" "$config_file"
+        chmod 600 "$config_file"
+        echo "已从备份恢复配置: $latest_backup" >&2
+        return 0
+    fi
+    echo "错误：找不到可用的备份文件" >&2
+    return 1
+}
+
 main() {
     parse_args "$@"
     detect_user_context
@@ -410,7 +453,26 @@ main() {
         return 0  # test seam: stop after IP+user+credentials
     fi
 
-    generate_server_config
+    local new_config
+    new_config=$(generate_server_config)
+
+    # Back up the currently installed config before touching it.
+    backup_config "$SING_BOX_CONFIG_PATH"
+
+    if ! validate_config "$new_config"; then
+        echo "配置校验失败，保持现状不做改动" >&2
+        exit 1
+    fi
+
+    if ! setup_service "$new_config"; then
+        echo "服务启动失败，尝试恢复备份..." >&2
+        if restore_config "$SING_BOX_CONFIG_PATH"; then
+            systemctl restart sing-box >/dev/null 2>&1 || true
+        fi
+        exit 1
+    fi
+
+    check_listening "$PORT"
 }
 
 # Only run when executed directly; sourcing the file (tests) must not install.
