@@ -21,6 +21,7 @@ EOF
 parse_args() {
     IP=""
     PORT="$DEFAULT_PORT"
+    PORT_EXPLICIT=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --ip)
@@ -31,6 +32,7 @@ parse_args() {
             --port)
                 [[ $# -ge 2 ]] || { echo "错误：--port 需要一个参数" >&2; usage 2; }
                 PORT="$2"
+                PORT_EXPLICIT=1
                 shift 2
                 ;;
             --help)
@@ -127,6 +129,121 @@ detect_user_context() {
     fi
 }
 
+# --- credentials & state ----------------------------------------------------
+
+readonly UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+readonly HEX_RE='^[0-9a-fA-F]+$'
+
+# Generate a UUID (Linux kernel interface, falling back to openssl).
+gen_uuid() {
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        local h
+        h=$(openssl rand -hex 16)
+        printf '%s-%s-%s-%s-%s\n' \
+            "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
+    fi
+}
+
+# Parse `sing-box generate reality-keypair` output (accepts "PrivateKey: x",
+# "Private key: x", or bare base64 lines) into REALITY_PRIVATE_KEY/PUBLIC_KEY.
+parse_keypair() {
+    local out="$1" priv="" pub="" line
+    while IFS= read -r line; do
+        case "$line" in
+            *[Pp]rivate*"key"*) priv="${line##*: }"; priv="${priv// /}" ;;
+            *[Pp]ublic*"key"*)  pub="${line##*: }";  pub="${pub// /}" ;;
+        esac
+    done <<<"$out"
+    if [[ -z "$priv" || -z "$pub" ]]; then
+        local -a lines=()
+        mapfile -t lines <<<"$out"
+        priv="${lines[0]:-}"; pub="${lines[1]:-}"
+        priv="${priv// /}"; pub="${pub// /}"
+    fi
+    [[ -n "$priv" && -n "$pub" ]] || return 1
+    REALITY_PRIVATE_KEY="$priv"
+    REALITY_PUBLIC_KEY="$pub"
+}
+
+generate_credentials() {
+    if [[ -f "$STATE_DIR/state.env" ]]; then
+        echo "加载已有凭据..." >&2
+        load_state || return 1
+        # Reuse the stored port unless the operator explicitly overrode it.
+        if [[ "${PORT_EXPLICIT:-0}" -eq 0 && -n "${STATE_PORT:-}" ]]; then
+            PORT="$STATE_PORT"
+        fi
+        return 0
+    fi
+
+    echo "生成新凭据..." >&2
+    UUID=$(gen_uuid)
+    [[ "$UUID" =~ $UUID_RE ]] || { echo "错误：生成的 UUID 无效" >&2; return 1; }
+
+    local keypair
+    keypair=$(sing-box generate reality-keypair) || {
+        echo "错误：无法生成 REALITY 密钥对（sing-box 未安装？）" >&2
+        return 1
+    }
+    parse_keypair "$keypair" || { echo "错误：解析 REALITY 密钥对失败" >&2; return 1; }
+
+    SHORT_ID=$(openssl rand -hex 4)
+    save_state
+}
+
+# Read state.env without sourcing it. Rejects bad value formats; ignores any
+# key outside the known set. Exposes STATE_PORT for the reuse rule.
+load_state() {
+    local file="$STATE_DIR/state.env" key value n=0
+    STATE_PORT=""
+
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        case "$key" in
+            UUID)
+                [[ "$value" =~ $UUID_RE ]] || { echo "错误：state.env 中 UUID 格式无效" >&2; return 1; }
+                UUID="$value" ;;
+            REALITY_PRIVATE_KEY) REALITY_PRIVATE_KEY="$value" ;;
+            REALITY_PUBLIC_KEY)  REALITY_PUBLIC_KEY="$value" ;;
+            SHORT_ID)
+                [[ "$value" =~ $HEX_RE ]] || { echo "错误：state.env 中 SHORT_ID 格式无效" >&2; return 1; }
+                SHORT_ID="$value" ;;
+            PORT)
+                [[ "$value" =~ ^[0-9]+$ ]] || { echo "错误：state.env 中 PORT 格式无效" >&2; return 1; }
+                STATE_PORT="$value" ;;
+            *) ;;  # unknown key: ignore, never evaluate
+        esac
+        n=$((n + 1))
+    done < "$file"
+
+    (( n > 0 )) || { echo "错误：state.env 内容无效" >&2; return 1; }
+    [[ -n "${UUID:-}" ]] || { echo "错误：state.env 缺少 UUID" >&2; return 1; }
+    [[ -n "${REALITY_PRIVATE_KEY:-}" ]] || { echo "错误：state.env 缺少私钥" >&2; return 1; }
+    [[ -n "${SHORT_ID:-}" ]] || { echo "错误：state.env 缺少 SHORT_ID" >&2; return 1; }
+    return 0
+}
+
+# Atomically write state.env with 0600 perms inside a 0700 directory.
+save_state() {
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR"
+    local tmp
+    tmp=$(mktemp "$STATE_DIR/.state.env.XXXXXX")
+    chmod 600 "$tmp"
+    {
+        printf 'UUID=%s\n' "$UUID"
+        printf 'REALITY_PRIVATE_KEY=%s\n' "$REALITY_PRIVATE_KEY"
+        printf 'REALITY_PUBLIC_KEY=%s\n' "$REALITY_PUBLIC_KEY"
+        printf 'SHORT_ID=%s\n' "$SHORT_ID"
+        printf 'PORT=%s\n' "$PORT"
+        printf 'PUBLIC_IP=%s\n' "${PUBLIC_IP:-}"
+    } > "$tmp"
+    mv -f "$tmp" "$STATE_DIR/state.env"
+    chmod 600 "$STATE_DIR/state.env"
+}
+
 main() {
     parse_args "$@"
     detect_user_context
@@ -139,6 +256,8 @@ main() {
     fi
 
     echo "使用公网 IP: $PUBLIC_IP"
+
+    generate_credentials
 }
 
 # Only run when executed directly; sourcing the file (tests) must not install.

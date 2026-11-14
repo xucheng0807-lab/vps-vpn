@@ -153,4 +153,95 @@ _fake_curl() {
     [[ "$output" == *"无法解析用户"* ]]
 }
 
+# --- Task 4: credential generation and state management ---------------------
+
+_stub_crypto_tools() {
+    sing-box() {
+        if [[ "$1" == "generate" && "$2" == "reality-keypair" ]]; then
+            echo "PrivateKey: test-private-key-AAAA"
+            echo "PublicKey: test-public-key-BBBB"
+            return 0
+        fi
+        return 0
+    }
+    openssl() { echo "deadbeefdeadbeefdeadbeefdeadbeef"; }
+    export -f sing-box openssl
+}
+
+# True only where chmod actually round-trips (Linux). MSYS/NTFS discards bits.
+_fs_supports_perms() {
+    local f; f=$(mktemp)
+    chmod 600 "$f" 2>/dev/null
+    local m; m=$(stat -c '%a' "$f" 2>/dev/null || echo x)
+    rm -f "$f"
+    [[ "$m" == "600" ]]
+}
+
+@test "generate_credentials creates a new state file with secure perms" {
+    STATE_DIR="$(mktemp -d)/state"
+    PORT=443; PUBLIC_IP=1.2.3.4
+    _stub_crypto_tools
+    CHMOD_LOG="$(mktemp)"
+    export CHMOD_LOG
+    chmod() { printf '%s\n' "$*" >> "$CHMOD_LOG"; command chmod "$@" 2>/dev/null || true; }
+    export -f chmod
+    generate_credentials >/dev/null
+    [ -f "$STATE_DIR/state.env" ]
+    grep -q '^UUID=' "$STATE_DIR/state.env"
+    grep -q '^REALITY_PRIVATE_KEY=test-private-key-AAAA' "$STATE_DIR/state.env"
+    grep -q '^REALITY_PUBLIC_KEY=test-public-key-BBBB' "$STATE_DIR/state.env"
+    grep -q '^SHORT_ID=' "$STATE_DIR/state.env"
+    # Our code must request 0700 on the dir and 0600 on the file.
+    grep -q "700 $STATE_DIR" "$CHMOD_LOG"
+    grep -q "600 $STATE_DIR/state.env" "$CHMOD_LOG"
+    # Where the filesystem honors bits, verify they really stuck.
+    if _fs_supports_perms; then
+        [ "$(stat -c '%a' "$STATE_DIR/state.env")" = "600" ]
+        [ "$(stat -c '%a' "$STATE_DIR")" = "700" ]
+    fi
+}
+
+@test "generate_credentials reuses existing state without new keys" {
+    STATE_DIR="$(mktemp -d)/state"
+    mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+    cat > "$STATE_DIR/state.env" <<'EOF'
+UUID=11111111-2222-3333-4444-555555555555
+REALITY_PRIVATE_KEY=keep-private-key
+REALITY_PUBLIC_KEY=keep-public-key
+SHORT_ID=abcd1234
+PORT=8443
+PUBLIC_IP=9.9.9.9
+EOF
+    chmod 600 "$STATE_DIR/state.env"
+    sing-box() { return 99; }   # must NOT be called on reuse
+    export -f sing-box
+    generate_credentials >/dev/null
+    [ "$UUID" = "11111111-2222-3333-4444-555555555555" ]
+    [ "$REALITY_PRIVATE_KEY" = "keep-private-key" ]
+    [ "$PORT" = "8443" ]
+    grep -q '^UUID=11111111-2222-3333-4444-555555555555' "$STATE_DIR/state.env"
+}
+
+@test "load_state rejects malformed UUID" {
+    STATE_DIR="$(mktemp -d)/state"; mkdir -p "$STATE_DIR"
+    printf 'UUID=not-a-uuid\nREALITY_PRIVATE_KEY=x\nSHORT_ID=\n' > "$STATE_DIR/state.env"
+    run load_state
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"格式无效"* ]]
+}
+
+@test "load_state rejects unknown keys silently" {
+    STATE_DIR="$(mktemp -d)/state"; mkdir -p "$STATE_DIR"
+    cat > "$STATE_DIR/state.env" <<'EOF'
+UUID=11111111-2222-3333-4444-555555555555
+REALITY_PRIVATE_KEY=pk
+SHORT_ID=abcd1234
+EVIL=$(touch /tmp/pwned)
+EOF
+    load_state
+    [ "$UUID" = "11111111-2222-3333-4444-555555555555" ]
+    [ ! -f /tmp/pwned ]
+}
+
+
 
