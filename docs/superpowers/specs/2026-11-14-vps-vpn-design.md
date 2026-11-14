@@ -143,24 +143,24 @@ ssh -i /path/to/key.pem ubuntu@<VPS公网IPv4>
 - 首次执行生成凭据。再次执行必须验证并复用已有凭据与端口；如果用户显式更改地址或端口，只更新对应配置。
 - 首版不提供自动轮换命令。凭据泄漏时，文档提供维护窗口内的手工轮换步骤：备份后删除本项目的 `state.env`，重新运行安装以生成新凭据，并替换所有客户端配置；脚本不得因普通重复执行而删除状态或轮换凭据。
 
-AWS 普通用户下载副本：
+通用用户下载副本（自动检测当前用户）：
 
 ```text
-/home/<实际用户>/vps-vpn/client.yaml
+/home/<SUDO_USER>/vps-vpn/client.yaml
 ```
 
-该副本由实际用户拥有，权限为 `0600`，父目录权限为 `0700`。如果脚本由 root 直接运行而没有普通用户上下文，只生成 root 目录文件，并提供安全的 `sudo cat` 下载方式。
+脚本通过 `SUDO_USER` 环境变量自动识别执行安装的实际用户（如 `ubuntu`、`debian`、`root` 等），并将客户端 YAML 复制到该用户的 home 目录。如果直接以 `root` 登录运行，则不生成非 root 副本，只保留 `/root/vps-vpn/` 下的主文件。
 
-下载示例：
+下载示例（根据检测到的用户名动态生成）：
 
 ```bash
-scp -i /path/to/key.pem ubuntu@<VPS公网IPv4>:/home/ubuntu/vps-vpn/client.yaml .
+scp <SUDO_USER>@<VPS公网IPv4>:/home/<SUDO_USER>/vps-vpn/client.yaml .
 ```
 
-或任意允许 sudo 的用户：
+或任何允许 sudo 的用户（通用形式）：
 
 ```bash
-ssh -i /path/to/key.pem ubuntu@<VPS公网IPv4> \
+ssh <SUDO_USER>@<VPS公网IPv4> \
   'sudo cat /root/vps-vpn/client.yaml' > client.yaml
 ```
 
