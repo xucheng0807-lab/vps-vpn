@@ -14,7 +14,7 @@ Usage: $SCRIPT_NAME [OPTIONS]
 Options:
   --ip IP       手动指定公网 IPv4 地址（默认自动检测）
   --port PORT   指定 VLESS 端口（默认 443）
-  --hy2-port PORT  指定 Hysteria 2 的 UDP 端口（默认 8443）
+  --hy2-port PORT  指定 Hysteria 2 的 UDP 端口（默认随机高端口）
   --no-hy2      不部署 Hysteria 2，仅保留 VLESS + REALITY
   --skip-deps   跳过自动安装系统依赖（已自行备好环境时使用）
   --help        显示此帮助信息
@@ -277,7 +277,7 @@ generate_credentials() {
         if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
             local changed=0
             if [[ -z "${HY2_PORT:-}" ]]; then
-                HY2_PORT="$DEFAULT_HY2_PORT"
+                HY2_PORT=$(choose_hy2_port)
                 changed=1
             fi
             if [[ -z "${HY2_PASSWORD:-}" ]]; then
@@ -301,8 +301,9 @@ generate_credentials() {
     parse_keypair "$keypair" || { echo "错误：解析 REALITY 密钥对失败" >&2; return 1; }
 
     SHORT_ID=$(openssl rand -hex 4)
-    # Hysteria 2 credentials: random port if not given, strong password.
-    HY2_PORT="${HY2_PORT:-$DEFAULT_HY2_PORT}"
+    # Hysteria 2 credentials: random high port unless --hy2-port was given,
+    # plus a strong password.
+    HY2_PORT="${HY2_PORT:-$(choose_hy2_port)}"
     HY2_PASSWORD=$(openssl rand -hex 16)
     save_state
 }
@@ -590,9 +591,9 @@ proxies:
     password: {{HY2_PASSWORD}}
     sni: {{REALITY_TARGET}}
     skip-cert-verify: true
+    alpn:
+      - h3
     udp: true
-    up: "100 Mbps"
-    down: "300 Mbps"
 
 proxy-groups:
   - name: "Global"
@@ -754,6 +755,31 @@ check_port_available() {
         fi
     fi
     return 0
+}
+
+# Pick a random high UDP port for Hysteria 2. Rationale: 8443 is the registered
+# HTTP/3-alt port and some ISPs deprioritise UDP there, so a random high port
+# behaves better in practice (a reference installer does the same). Range and
+# attempt count are overridable so tests stay fast and deterministic.
+choose_hy2_port() {
+    local lo="${HY2_PORT_MIN:-445}"
+    local hi="${HY2_PORT_MAX:-65535}"
+    local attempts="${HY2_PORT_ATTEMPTS:-50}"
+    local i candidate
+
+    for (( i = 0; i < attempts; i++ )); do
+        candidate=$(( lo + RANDOM % (hi - lo + 1) ))
+        # Never hand back the QUIC-alt port we are trying to avoid, and skip
+        # anything already bound.
+        [[ "$candidate" -eq 8443 ]] && continue
+        if command -v ss >/dev/null 2>&1 && ss -lntu 2>/dev/null | grep -q ":$candidate "; then
+            continue
+        fi
+        echo "$candidate"
+        return 0
+    done
+    # Fall back to a fixed high port rather than failing the install.
+    echo 32768
 }
 
 # Best-effort listening-port check. Advisory only: proves the unit bound the

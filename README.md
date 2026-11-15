@@ -6,7 +6,7 @@
 
 - 一条命令完成安装，自动装好系统依赖与环境，开箱即用
 - 自动校验系统版本/架构/权限，自动用 apt 补齐缺失命令（`curl`、`openssl`、`iproute2`、`ca-certificates`、`lsof` 等）
-- 同时部署 VLESS + REALITY（TCP 443）与 Hysteria 2（UDP 8443）两个协议
+- 同时部署 VLESS + REALITY（TCP 443）与 Hysteria 2（UDP 随机高端口）两个协议
 - 客户端节点名直接标明协议（`vps-vpn-vless` / `vps-vpn-hy2`），在 Global 策略组里手动切换
 - 检测到本机 ufw 已启用时自动放行代理 TCP/UDP 端口
 - 自动检测公网 IP 与当前登录用户
@@ -42,7 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/instal
 
 脚本最后会打印一段 `安装完成！` 的摘要，里面有：
 
-- 公网地址、VLESS 端口（默认 443）、Hysteria 2 端口（默认 8443/UDP）
+- 公网地址、VLESS 端口（默认 443）、Hysteria 2 端口（默认随机高端口，安装时打印具体值）
 - 客户端配置文件的绝对路径
 - 一条可直接复制执行的 `scp` 下载命令
 
@@ -59,7 +59,7 @@ curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/instal
 # 使用自定义 VLESS 端口（默认 443）
 curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --port 8443
 
-# 使用自定义 Hysteria 2 端口（默认 8443/UDP）
+# 使用自定义 Hysteria 2 端口（默认随机高端口，安装时打印实际值）
 curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --hy2-port 9443
 
 # 只部署 VLESS + REALITY，不部署 Hysteria 2
@@ -115,7 +115,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main
 
 | 节点 | 协议 | 传输 | 适用场景 |
 | --- | --- | --- | --- |
-| `vps-vpn-hy2` | Hysteria 2 | UDP 8443 | 弱网/丢包环境下更快 |
+| `vps-vpn-hy2` | Hysteria 2 | UDP 随机高端口 | 弱网/丢包环境下更快 |
 | `vps-vpn-vless` | VLESS + REALITY | TCP 443 | UDP 被运营商封锁时用它 |
 
 `Global` 是普通的 `select` 策略组，两个节点都是它的直接成员，**没有自动故障切换**：流量走哪个协议完全由你在客户端里选，不会在你不知情时被换到另一条链路。
@@ -200,9 +200,9 @@ HY2 证书刻意放在 `/etc/sing-box` 而不是 `/root/vps-vpn`：服务以非�
 
 - 来自可信来源的 SSH（通常 22）
 - 代理使用的 **TCP** 端口（VLESS，默认 443）
-- 代理使用的 **UDP** 端口（Hysteria 2，默认 8443）
+- 代理使用的 **UDP** 端口（Hysteria 2，默认随机高端口，安装结束会打印具体值）
 
-> UDP 8443 最容易漏。AWS / Lightsail / GCP 的安全组（防火墙）默认只放行 TCP，若只开了 TCP 443，客户端里 `vps-vpn-hy2` 节点会一直连不上，表现为选了 HY2 却没网——此时切到 `vps-vpn-vless` 立刻正常。HY2 调通后建议在 Clash 里看连接详情确认走的是 UDP。
+> UDP 端口最容易漏。AWS / Lightsail / GCP 的安全组（防火墙）默认只放行 TCP，若只开了 TCP 443，客户端里 `vps-vpn-hy2` 节点会一直连不上，表现为选了 HY2 却没网——此时切到 `vps-vpn-vless` 立刻正常。**务必按安装结束时打印的 HY2 端口去放行 UDP**，不要凭记忆填 8443。HY2 调通后建议在 Clash 里看连接详情确认走的是 UDP。
 
 服务启动成功仅表示 sing-box 已在本机就绪，不代表云安全组已放行或客户端可公网连通，请分别核验。
 

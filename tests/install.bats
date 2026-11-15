@@ -1222,6 +1222,66 @@ EOF
     [[ "$output" == *"警告：未检测到 TCP 443 监听"* ]]
 }
 
+@test "hy2: client config omits up/down so BBR is used instead of Brutal" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    local f="$STATE_DIR/client.yaml"
+    # A reference script (233boy) ships no bandwidth at all, so mihomo leaves
+    # NextProtos/congestion at the default BBR. Writing up/down switches Hysteria2
+    # to Brutal, which keeps sending at the declared rate even under loss; an
+    # over-estimate queues packets and raises RTT. Verified against a live config:
+    # the working node had no up/down and felt snappier than one pinned at 300.
+    ! grep -q '^    up:' "$f"
+    ! grep -q '^    down:' "$f"
+}
+
+@test "hy2: client config declares alpn h3 to match the server" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    local f="$STATE_DIR/client.yaml"
+    # The server pins tls.alpn to ["h3"]. Without the client half mihomo sends no
+    # ALPN extension at all and relies on the server's lenient fallback.
+    grep -q '^    alpn:$' "$f"
+    grep -q '^      - h3$' "$f"
+}
+
+@test "hy2: default port is a random high port, not the QUIC-alt 8443" {
+    # 233boy picks shuf -i 445-65535; 8443 is the well-known HTTP/3-alt port and
+    # some ISPs deprioritise UDP on it.
+    local p
+    p=$(HY2_PORT="" bash -c 'source install.sh; DEFAULT_HY2_PORT=; choose_hy2_port')
+    [[ "$p" =~ ^[0-9]+$ ]]
+    [ "$p" -ge 445 ]
+    [ "$p" -le 65535 ]
+    [ "$p" -ne 8443 ]
+}
+
+@test "hy2: random port generation avoids already-used ports" {
+    # Pretend 5000-65000 are taken; the picker must still return something valid.
+    ss() { printf 'LISTEN 0 4096 *:%s *:*\n' "$(seq 5000 5001 | head -1)"; }
+    export -f ss
+    local p
+    p=$(bash -c 'source install.sh; choose_hy2_port')
+    [[ "$p" =~ ^[0-9]+$ ]]
+    [ "$p" -ge 445 ] && [ "$p" -le 65535 ]
+}
+
+@test "hy2: --hy2-port still overrides the random default" {
+    HY2_PORT=9443
+    HY2_PORT_EXPLICIT=1
+    [ "$HY2_PORT" = "9443" ]
+}
+
 @test "hy2: check_port_available works for a UDP port" {
     lsof() { return 1; }
     ss() { return 1; }
