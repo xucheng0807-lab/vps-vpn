@@ -432,7 +432,7 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     run install_sing_box
     [ "$status" -eq 0 ]
     grep -q 'curl .*sing-box.app' "$CAP"
-    grep -q 'bash .*--version 1.10.0' "$CAP"
+    grep -q "bash .*--version $SING_BOX_VERSION" "$CAP"
 }
 
 # --- Task 8: backup and restore --------------------------------------------
@@ -769,6 +769,32 @@ _write_os_release() {  # $1=dir $2=id $3=ver
 @test "args: default SKIP_DEPS is 0" {
     parse_args
     [ "$SKIP_DEPS" -eq 0 ]
+}
+
+# Regression: sing-box 1.10.0 has a REALITY defect that rejects every client
+# with "REALITY: processed invalid connection" even when keys/short_id/uuid all
+# match. Verified on a real VPS: 1.10.0 always fails, 1.14.4 works.
+@test "version: pinned sing-box version is at least 1.11 (REALITY fix)" {
+    local ver major minor
+    ver="$SING_BOX_VERSION"
+    major="${ver%%.*}"
+    minor="${ver#*.}"; minor="${minor%%.*}"
+    [ "$major" -eq 1 ]
+    [ "$minor" -ge 11 ]
+}
+
+@test "version: install_sing_box pins a REALITY-safe version" {
+    CAP="$(mktemp)"; export CAP
+    curl() { printf 'curl %s\n' "$*" >> "$CAP"; }
+    bash() { printf 'bash %s\n' "$*" >> "$CAP"; cat >/dev/null; }
+    command() { if [[ "$1" == "-v" && "$2" == "sing-box" ]]; then return 1; fi; builtin command "$@"; }
+    export -f curl bash command
+    install_sing_box >/dev/null 2>&1
+    local pinned
+    pinned=$(grep -o -- '--version [0-9.]*' "$CAP" | awk '{print $2}' | head -1)
+    [ -n "$pinned" ]
+    local minor; minor=$(echo "$pinned" | cut -d. -f2)
+    [ "$minor" -ge 11 ]
 }
 
 # --- C2: single-file install (no external templates needed) -----------------
