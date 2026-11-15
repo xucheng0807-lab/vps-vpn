@@ -411,6 +411,9 @@ generate_client_config() {
 
     if [[ "$USER_NAME" != "root" ]]; then
         mkdir -p "$USER_HOME/vps-vpn"
+        # Hand the directory to the user first: root created it, so without
+        # chown the user cannot traverse it and `scp`/downloads fail.
+        chown "$USER_ID:$GROUP_ID" "$USER_HOME/vps-vpn" 2>/dev/null || true
         chmod 700 "$USER_HOME/vps-vpn"
         cp "$main_config" "$user_config"
         chown "$USER_ID:$GROUP_ID" "$user_config" 2>/dev/null || true

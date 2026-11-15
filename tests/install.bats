@@ -363,6 +363,29 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     grep -q "600 $USER_HOME/vps-vpn/client.yaml" "$CHMOD_LOG"
 }
 
+# Regression: the user copy's DIRECTORY (created by root) must be owned by the
+# target user, otherwise that user cannot traverse it and `scp` fails with
+# "No such file or directory". Failed for real on a VPS as sudo user.
+@test "generate_client_config makes the user-copy directory accessible to the user" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="ubuntu"; USER_HOME="$(mktemp -d)/home/ubuntu"; USER_ID=1000; GROUP_ID=1000
+    PUBLIC_IP="1.2.3.4"; PORT=443
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    mkdir -p "$USER_HOME"
+    cd "$PROJECT_ROOT"
+    CHOWN_LOG="$(mktemp)"; export CHOWN_LOG
+    CHMOD_LOG="$(mktemp)"; export CHMOD_LOG
+    chown() { printf '%s\n' "$*" >> "$CHOWN_LOG"; command chown "$@" 2>/dev/null || true; }
+    chmod() { printf '%s\n' "$*" >> "$CHMOD_LOG"; command chmod "$@" 2>/dev/null || true; }
+    export -f chown chmod
+    generate_client_config >/dev/null
+    # The directory itself must be handed to the user (not only the file).
+    grep -q "1000:1000 $USER_HOME/vps-vpn\$" "$CHOWN_LOG"
+    # And the produced directory must be 0700 for its owner.
+    grep -q "700 $USER_HOME/vps-vpn\$" "$CHMOD_LOG"
+}
+
 @test "validate_client_config fails on malformed YAML" {
     local f; f=$(mktemp); printf 'proxies: [unclosed\n' > "$f"
     run validate_client_config "$f"
