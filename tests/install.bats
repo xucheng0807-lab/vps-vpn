@@ -541,10 +541,12 @@ case "$*" in
 esac
 S
     chmod +x "$bin"/*
+    printf 'ID=ubuntu\nVERSION_ID="22.04"\n' > "$root/os-release"
     local real_bash; real_bash=$(command -v bash)
     run env -i PATH="$bin:/usr/bin:/bin" STATE_DIR="$root/state" \
         SING_BOX_CONFIG_PATH="$root/etc/sing-box/config.json" \
-        "$real_bash" "$PROJECT_ROOT/install.sh" --ip 1.2.3.4
+        OS_RELEASE_FILE="$root/os-release" EUID_OVERRIDE=0 ARCH_OVERRIDE=amd64 \
+        "$real_bash" "$PROJECT_ROOT/install.sh" --ip 1.2.3.4 --skip-deps
     [ "$status" -eq 0 ]
     [ -f "$root/state/state.env" ]
     [ -f "$root/state/client.yaml" ]
@@ -553,6 +555,172 @@ S
     # No placeholders left in either generated config.
     run grep -l '{{' "$root/state/client.yaml" "$root/etc/sing-box/config.json"
     [ "$status" -ne 0 ]
+}
+
+# ===========================================================================
+# Feature: one-command dependency + environment bootstrap
+# ===========================================================================
+
+# Helper: make a fake os-release file and point the reader at it.
+_write_os_release() {  # $1=dir $2=id $3=ver
+    printf 'ID=%s\nVERSION_ID="%s"\n' "$2" "$3" > "$1/os-release"
+}
+
+# --- check_environment ------------------------------------------------------
+@test "env: accepts Ubuntu 22.04 amd64 as root" {
+    local d; d=$(mktemp -d); _write_os_release "$d" ubuntu 22.04
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=amd64; EUID_OVERRIDE=0
+    run check_environment
+    [ "$status" -eq 0 ]
+}
+
+@test "env: accepts Ubuntu 24.04 arm64 as root" {
+    local d; d=$(mktemp -d); _write_os_release "$d" ubuntu 24.04
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=arm64; EUID_OVERRIDE=0
+    run check_environment
+    [ "$status" -eq 0 ]
+}
+
+@test "env: rejects non-Ubuntu OS" {
+    local d; d=$(mktemp -d); _write_os_release "$d" debian 12
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=amd64; EUID_OVERRIDE=0
+    run check_environment
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Ubuntu"* ]]
+}
+
+@test "env: rejects unsupported Ubuntu version" {
+    local d; d=$(mktemp -d); _write_os_release "$d" ubuntu 20.04
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=amd64; EUID_OVERRIDE=0
+    run check_environment
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"版本"* || "$output" == *"22.04"* ]]
+}
+
+@test "env: rejects unsupported architecture" {
+    local d; d=$(mktemp -d); _write_os_release "$d" ubuntu 22.04
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=i386; EUID_OVERRIDE=0
+    run check_environment
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"架构"* || "$output" == *"amd64"* ]]
+}
+
+@test "env: rejects non-root" {
+    local d; d=$(mktemp -d); _write_os_release "$d" ubuntu 22.04
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=amd64; EUID_OVERRIDE=1000
+    run check_environment
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"root"* ]]
+}
+
+# --- ensure_dependencies ----------------------------------------------------
+@test "deps: installs missing packages via apt-get" {
+    APT_LOG="$(mktemp)"; export APT_LOG
+    apt-get() { printf 'apt-get %s\n' "$*" >> "$APT_LOG"; return 0; }
+    export -f apt-get
+    # fake command lookup: curl missing, others present
+    command() {
+        if [[ "$1" == "-v" ]]; then
+            case "$2" in
+                curl) return 1 ;;
+                *) return 0 ;;
+            esac
+        fi
+        builtin command "$@"
+    }
+    export -f command
+    run ensure_dependencies
+    [ "$status" -eq 0 ]
+    grep -q 'install' "$APT_LOG"
+    grep -q 'curl' "$APT_LOG"
+}
+
+@test "deps: does nothing when all tools are present" {
+    APT_LOG="$(mktemp)"; export APT_LOG
+    apt-get() { printf 'apt-get %s\n' "$*" >> "$APT_LOG"; return 0; }
+    command() { if [[ "$1" == "-v" ]]; then return 0; fi; builtin command "$@"; }
+    export -f apt-get command
+    run ensure_dependencies
+    [ "$status" -eq 0 ]
+    [ ! -s "$APT_LOG" ]
+}
+
+@test "deps: skips entirely when --skip-deps given" {
+    APT_LOG="$(mktemp)"; export APT_LOG
+    apt-get() { printf 'apt-get %s\n' "$*" >> "$APT_LOG"; return 0; }
+    command() { if [[ "$1" == "-v" ]]; then return 1; fi; builtin command "$@"; }
+    export -f apt-get command
+    SKIP_DEPS=1
+    run ensure_dependencies
+    [ "$status" -eq 0 ]
+    [ ! -s "$APT_LOG" ]
+}
+
+@test "deps: fails clearly when apt-get is unavailable" {
+    command() {
+        if [[ "$1" == "-v" && "$2" == "apt-get" ]]; then return 1; fi
+        if [[ "$1" == "-v" && "$2" == "curl" ]]; then return 1; fi
+        if [[ "$1" == "-v" ]]; then return 0; fi
+        builtin command "$@"
+    }
+    export -f command
+    SKIP_DEPS=0
+    run ensure_dependencies
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"apt"* || "$output" == *"手动"* ]]
+}
+
+# --- configure_firewall -----------------------------------------------------
+@test "fw: allows port when ufw is active" {
+    FW_LOG="$(mktemp)"; export FW_LOG
+    command() { if [[ "$1" == "-v" && "$2" == "ufw" ]]; then return 0; fi; builtin command "$@"; }
+    ufw() {
+        printf 'ufw %s\n' "$*" >> "$FW_LOG"
+        if [[ "$1" == "status" ]]; then printf 'Status: active\n'; fi
+        return 0
+    }
+    export -f command ufw
+    run configure_firewall 443
+    [ "$status" -eq 0 ]
+    grep -q 'allow 443/tcp' "$FW_LOG"
+}
+
+@test "fw: does nothing when ufw is inactive" {
+    FW_LOG="$(mktemp)"; export FW_LOG
+    command() { if [[ "$1" == "-v" && "$2" == "ufw" ]]; then return 0; fi; builtin command "$@"; }
+    ufw() {
+        printf 'ufw %s\n' "$*" >> "$FW_LOG"
+        if [[ "$1" == "status" ]]; then printf 'Status: inactive\n'; fi
+        return 0
+    }
+    export -f command ufw
+    run configure_firewall 443
+    [ "$status" -eq 0 ]
+    ! grep -q 'allow 443/tcp' "$FW_LOG"
+}
+
+@test "fw: skips when ufw is not installed" {
+    command() { if [[ "$1" == "-v" && "$2" == "ufw" ]]; then return 1; fi; builtin command "$@"; }
+    export -f command
+    run configure_firewall 443
+    [ "$status" -eq 0 ]
+}
+
+# --- --skip-deps argument ---------------------------------------------------
+@test "args: --skip-deps sets SKIP_DEPS=1" {
+    parse_args --skip-deps
+    [ "$SKIP_DEPS" -eq 1 ]
+}
+
+@test "args: default SKIP_DEPS is 0" {
+    parse_args
+    [ "$SKIP_DEPS" -eq 0 ]
 }
 
 # --- C2: single-file install (no external templates needed) -----------------

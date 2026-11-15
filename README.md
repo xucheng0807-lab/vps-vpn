@@ -4,7 +4,9 @@
 
 ## 功能特性
 
-- 一条命令完成安装，无需手动配置
+- 一条命令完成安装，自动装好系统依赖与环境，开箱即用
+- 自动校验系统版本/架构/权限，自动用 apt 补齐缺失命令（`curl`、`openssl`、`iproute2`、`ca-certificates`、`lsof` 等）
+- 检测到本机 ufw 已启用时自动放行代理 TCP 端口
 - 自动检测公网 IP 与当前登录用户
 - 自动生成或复用 UUID、REALITY 密钥对、short ID
 - 生成兼容 Mihomo 的客户端 YAML（Clash Verge / CMFA 通用）
@@ -17,6 +19,7 @@
 - Ubuntu 22.04 或 24.04（amd64 / arm64）
 - 具有公网 IPv4 地址的 VPS
 - root 权限或 sudo 权限
+- 可访问 Ubuntu 软件源（用于自动安装依赖）；离线或已自备环境时加 `--skip-deps`
 
 ## 快速开始
 
@@ -26,6 +29,8 @@
 curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash
 ```
 
+脚本会自动检查环境并安装缺失依赖，无需你手动 `apt install`。
+
 ### 自定义参数（可选）
 
 ```bash
@@ -34,6 +39,9 @@ curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/inst
 
 # 使用自定义端口（默认 443）
 curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --port 8443
+
+# 跳过自动安装依赖（已自行备好 curl/openssl 等环境时）
+curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --skip-deps
 ```
 
 ### 使用 sudo 时的注意
@@ -107,7 +115,9 @@ sudo journalctl -u sing-box -f    # 查看日志
 
 ## 防火墙与云厂商安全组
 
-脚本不会自动修改 UFW、nftables 或云厂商安全组，以免切断 SSH 或影响现有服务。请在云厂商控制台放行：
+本机防火墙：**若检测到 ufw 已启用**，脚本会自动执行 `ufw allow <端口>/tcp` 放行代理端口（绝不删除规则、绝不动 SSH、不改动其他端口）；ufw 未启用或未安装则跳过，不擅自开启。
+
+云厂商安全组：脚本**无法**修改，必须由你在控制台手动放行：
 
 - 来自可信来源的 SSH（通常 22）
 - 代理使用的 TCP 端口（默认 443）
