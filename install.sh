@@ -518,17 +518,19 @@ validate_config() {
 
 # --- client config ----------------------------------------------------------
 
-# Embedded Mihomo client template (single-file install).
+# Embedded Mihomo client template (single-file install). Node names carry the
+# protocol so the client list is self-explanatory: vps-vpn-vless / vps-vpn-hy2.
 client_template() {
     cat <<'YAML'
 proxies:
-  - name: "vps-vpn"
+  - name: "vps-vpn-vless"
     type: vless
     server: {{PUBLIC_IP}}
     port: {{PORT}}
     uuid: {{UUID}}
     flow: xtls-rprx-vision
     network: tcp
+    udp: true
     tls: true
     servername: {{REALITY_TARGET}}
     client-fingerprint: chrome
@@ -540,7 +542,7 @@ proxy-groups:
   - name: "Global"
     type: select
     proxies:
-      - "vps-vpn"
+      - "vps-vpn-vless"
 
 rules:
   - "IP-CIDR,127.0.0.0/8,DIRECT"
@@ -561,18 +563,20 @@ dns:
 YAML
 }
 
-# Client template with both nodes. The user switches manually in the
-# "Global" group; nothing auto-selects, so a broken protocol is easy to bypass.
+# Client template with both nodes. Both are direct members of the "Global"
+# select group so the user switches by hand; no fallback/url-test group, which
+# would silently move traffic between protocols behind their back.
 client_template_hy2() {
     cat <<'YAML'
 proxies:
-  - name: "vps-vpn"
+  - name: "vps-vpn-vless"
     type: vless
     server: {{PUBLIC_IP}}
     port: {{PORT}}
     uuid: {{UUID}}
     flow: xtls-rprx-vision
     network: tcp
+    udp: true
     tls: true
     servername: {{REALITY_TARGET}}
     client-fingerprint: chrome
@@ -586,6 +590,7 @@ proxies:
     password: {{HY2_PASSWORD}}
     sni: {{REALITY_TARGET}}
     skip-cert-verify: true
+    udp: true
     up: "100 Mbps"
     down: "300 Mbps"
 
@@ -593,16 +598,8 @@ proxy-groups:
   - name: "Global"
     type: select
     proxies:
-      - "自动切换"
       - "vps-vpn-hy2"
-      - "vps-vpn"
-  - name: "自动切换"
-    type: fallback
-    proxies:
-      - "vps-vpn-hy2"
-      - "vps-vpn"
-    url: "https://www.gstatic.com/generate_204"
-    interval: 300
+      - "vps-vpn-vless"
 
 rules:
   - "IP-CIDR,127.0.0.0/8,DIRECT"
@@ -885,11 +882,9 @@ EOF
     if [[ -n "$hy2_port" ]]; then
         cat <<EOF
 
-配置内含两个节点（vps-vpn-hy2 / vps-vpn），默认走 "自动切换"：
-  - vps-vpn-hy2   Hysteria 2，走 UDP $hy2_port，弱网/丢包环境下更快（默认首选）
-  - vps-vpn       VLESS + REALITY，走 TCP $PORT，UDP 被封锁时自动顶上（备用）
-  - "自动切换"    fallback 组：HY2 健康检查失败时自动切到 VLESS
-你也可以在 Global 策略组里手动固定其中任一节点。
+配置内含两个节点，在 Global 策略组里手动切换（无自动故障切换）：
+  - vps-vpn-hy2     Hysteria 2，走 UDP $hy2_port，弱网/丢包环境下更快
+  - vps-vpn-vless   VLESS + REALITY，走 TCP $PORT，UDP 被封锁时用它
 EOF
     fi
 

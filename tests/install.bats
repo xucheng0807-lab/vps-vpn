@@ -1074,6 +1074,39 @@ EOF
     ! grep -q '{{' "$f"
 }
 
+@test "hy2: every node enables UDP relay so UDP never leaks to DIRECT" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    local f="$STATE_DIR/client.yaml"
+    # mihomo's SupportUDP() returns the `udp` option, which defaults to false.
+    # Without udp: true the XUDP badge still shows but UDP flows fall through to
+    # DIRECT, leaking QUIC/HTTP3, games and voice traffic outside the tunnel.
+    # Verified on a live host: "doesn't match any rule using DIRECT" vs
+    # "match Match using Global[t-node]".
+    [ "$(grep -c '^    udp: true$' "$f")" -eq 2 ]
+    # one udp: true per node, each right under its own proxy block
+    awk '/^  - name: "vps-vpn-vless"/{v=1} /^  - name: "vps-vpn-hy2"/{h=1} /^    udp: true$/{if(v&&!h)vl++; else if(h)hy++} END{exit !(vl==1 && hy==1)}' "$f"
+}
+
+@test "hy2: --no-hy2 client config also enables UDP relay" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    ENABLE_HY2=0
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    local f="$STATE_DIR/client.yaml"
+    grep -q '^    udp: true$' "$f"
+    grep -q 'type: vless' "$f"
+}
+
 @test "hy2: client config exposes both nodes with manual switch group" {
     STATE_DIR="$(mktemp -d)"
     USER_NAME="root"; USER_HOME="$(mktemp -d)"
@@ -1083,13 +1116,13 @@ EOF
     cd "$PROJECT_ROOT"
     generate_client_config >/dev/null
     local f="$STATE_DIR/client.yaml"
-    grep -q 'name: "vps-vpn"' "$f"
+    grep -q 'name: "vps-vpn-vless"' "$f"
     grep -q 'name: "vps-vpn-hy2"' "$f"
     grep -q 'type: hysteria2' "$f"
     grep -q 'port: 8443' "$f"
     grep -q 'password: hy2secret' "$f"
     # both nodes must be selectable in the group
-    grep -q '\- "vps-vpn"' "$f"
+    grep -q '\- "vps-vpn-vless"' "$f"
     grep -q '\- "vps-vpn-hy2"' "$f"
     # skip-cert-verify belongs to the self-signed hysteria2 node only
     [ "$(grep -c 'skip-cert-verify' "$f")" -eq 1 ]
@@ -1097,7 +1130,7 @@ EOF
     ! grep -q 'priv-key-SECRET' "$f"
 }
 
-@test "hy2: Global defaults to the auto-failover group" {
+@test "hy2: node names say which protocol each one is" {
     STATE_DIR="$(mktemp -d)"
     USER_NAME="root"; USER_HOME="$(mktemp -d)"
     PUBLIC_IP="1.2.3.4"; PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
@@ -1106,13 +1139,15 @@ EOF
     cd "$PROJECT_ROOT"
     generate_client_config >/dev/null
     local f="$STATE_DIR/client.yaml"
-    mapfile -t global_block < <(grep -A3 'name: "Global"' "$f")
-    [[ "${global_block[1]}" == *'type: select'* ]]
-    # the first entry of a select group is the default selection
-    [[ "${global_block[3]}" == *'"自动切换"'* ]]
+    # the bare "vps-vpn" name gave no hint that it is the VLESS node
+    ! grep -q 'name: "vps-vpn"$' "$f"
+    ! grep -q '\- "vps-vpn"$' "$f"
+    # each name carries its protocol
+    grep -q 'name: "vps-vpn-vless"' "$f"
+    grep -q 'name: "vps-vpn-hy2"' "$f"
 }
 
-@test "hy2: auto-failover group prefers HY2 and falls back to VLESS" {
+@test "hy2: Global is a plain select group with no auto failover" {
     STATE_DIR="$(mktemp -d)"
     USER_NAME="root"; USER_HOME="$(mktemp -d)"
     PUBLIC_IP="1.2.3.4"; PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
@@ -1121,14 +1156,34 @@ EOF
     cd "$PROJECT_ROOT"
     generate_client_config >/dev/null
     local f="$STATE_DIR/client.yaml"
-    mapfile -t fb < <(grep -A3 'type: fallback' "$f")
-    grep -q 'name: "自动切换"' "$f"
-    # HY2 is primary, VLESS is the backup
-    [[ "${fb[2]}" == *'"vps-vpn-hy2"'* ]]
-    [[ "${fb[3]}" == *'"vps-vpn"'* ]]
-    # health check must exist, otherwise fallback never triggers
-    grep -q 'url: "https://www.gstatic.com/generate_204"' "$f"
-    grep -q 'interval: 300' "$f"
+    # the user switches protocols by hand, so no fallback/urlcheck group
+    ! grep -q 'type: fallback' "$f"
+    ! grep -q 'type: url-test' "$f"
+    ! grep -q '自动切换' "$f"
+    ! grep -q 'generate_204' "$f"
+    mapfile -t global_block < <(grep -A4 'name: "Global"' "$f")
+    [[ "${global_block[1]}" == *'type: select'* ]]
+    # both nodes are direct members of Global, nothing wraps them
+    [[ "${global_block[3]}" == *'"vps-vpn-hy2"'* ]]
+    [[ "${global_block[4]}" == *'"vps-vpn-vless"'* ]]
+}
+
+@test "hy2: --no-hy2 client config names the VLESS node by protocol" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    ENABLE_HY2=0
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    local f="$STATE_DIR/client.yaml"
+    grep -q 'name: "vps-vpn-vless"' "$f"
+    grep -q '\- "vps-vpn-vless"' "$f"
+    ! grep -q 'hysteria2' "$f"
+    # single-node config still needs a working select group
+    grep -q 'type: select' "$f"
+    grep -q 'MATCH,Global' "$f"
 }
 
 @test "check_listening reports the port once it is bound" {

@@ -1,13 +1,13 @@
 # VPS VPN 一键部署
 
-在 Ubuntu VPS 上一键部署 VLESS + REALITY 与 Hysteria 2 双协议代理，生成可由 Clash Verge（电脑）与 CMFA（Android）导入的 YAML 配置。默认走 Hysteria 2，VLESS 作为自动备用。使用官方 sing-box 包与 systemd 服务。
+在 Ubuntu VPS 上一键部署 VLESS + REALITY 与 Hysteria 2 双协议代理，生成可由 Clash Verge（电脑）与 CMFA（Android）导入的 YAML 配置。两个节点在客户端里手动切换。使用官方 sing-box 包与 systemd 服务。
 
 ## 功能特性
 
 - 一条命令完成安装，自动装好系统依赖与环境，开箱即用
 - 自动校验系统版本/架构/权限，自动用 apt 补齐缺失命令（`curl`、`openssl`、`iproute2`、`ca-certificates`、`lsof` 等）
 - 同时部署 VLESS + REALITY（TCP 443）与 Hysteria 2（UDP 8443）两个协议
-- 客户端默认使用 Hysteria 2，并用 fallback 策略组在 HY2 不可用时自动切到 VLESS
+- 客户端节点名直接标明协议（`vps-vpn-vless` / `vps-vpn-hy2`），在 Global 策略组里手动切换
 - 检测到本机 ufw 已启用时自动放行代理 TCP/UDP 端口
 - 自动检测公网 IP 与当前登录用户
 - 自动生成或复用 UUID、REALITY 密钥对、short ID、HY2 密码与自签证书
@@ -67,16 +67,16 @@ curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/inst
 
 ### 协议与节点
 
-默认部署两个节点，客户端配置里预置了自动故障切换：
+默认部署两个节点，节点名直接标明协议：
 
-| 节点 | 协议 | 传输 | 定位 |
+| 节点 | 协议 | 传输 | 适用场景 |
 | --- | --- | --- | --- |
-| `vps-vpn-hy2` | Hysteria 2 | UDP 8443 | **默认首选**，弱网/丢包环境更快 |
-| `vps-vpn` | VLESS + REALITY | TCP 443 | **备用**，UDP 被运营商封锁时顶上 |
+| `vps-vpn-hy2` | Hysteria 2 | UDP 8443 | 弱网/丢包环境下更快 |
+| `vps-vpn-vless` | VLESS + REALITY | TCP 443 | UDP 被运营商封锁时用它 |
 
-`Global` 策略组默认为 `自动切换`（`fallback` 类型）：每 300 秒用 `https://www.gstatic.com/generate_204` 对 `vps-vpn-hy2` 做健康检查，失败即自动切到 `vps-vpn`，恢复后再切回。
+`Global` 是普通的 `select` 策略组，两个节点都是它的直接成员，**没有自动故障切换**：流量走哪个协议完全由你在客户端里选，不会在你不知情时被换到另一条链路。
 
-需要手动固定某个协议时，在 Clash Verge / CMFA 的「代理 → Global」里直接选 `vps-vpn-hy2` 或 `vps-vpn` 即可。
+切换方式：Clash Verge / CMFA 的「代理 → Global」里点 `vps-vpn-hy2` 或 `vps-vpn-vless`。
 
 > Hysteria 2 走自签证书，客户端配置里带 `skip-cert-verify: true`；这是 HY2 的常规做法，不影响 REALITY 那一路的 TLS 校验。
 
@@ -153,7 +153,7 @@ HY2 证书刻意放在 `/etc/sing-box` 而不是 `/root/vps-vpn`：服务以非�
 - 代理使用的 **TCP** 端口（VLESS，默认 443）
 - 代理使用的 **UDP** 端口（Hysteria 2，默认 8443）
 
-> UDP 8443 最容易漏。AWS / Lightsail / GCP 的安全组（防火墙）默认只放行 TCP，若只开了 TCP 443，客户端里 HY2 节点会一直连不上，`自动切换` 会一路退回 VLESS，看起来"能用"但其实没走 HY2。HY2 调通后建议在 Clash 里看连接详情确认走的是 UDP。
+> UDP 8443 最容易漏。AWS / Lightsail / GCP 的安全组（防火墙）默认只放行 TCP，若只开了 TCP 443，客户端里 `vps-vpn-hy2` 节点会一直连不上，表现为选了 HY2 却没网——此时切到 `vps-vpn-vless` 立刻正常。HY2 调通后建议在 Clash 里看连接详情确认走的是 UDP。
 
 服务启动成功仅表示 sing-box 已在本机就绪，不代表云安全组已放行或客户端可公网连通，请分别核验。
 
