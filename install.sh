@@ -593,8 +593,16 @@ proxy-groups:
   - name: "Global"
     type: select
     proxies:
-      - "vps-vpn"
+      - "自动切换"
       - "vps-vpn-hy2"
+      - "vps-vpn"
+  - name: "自动切换"
+    type: fallback
+    proxies:
+      - "vps-vpn-hy2"
+      - "vps-vpn"
+    url: "https://www.gstatic.com/generate_204"
+    interval: 300
 
 rules:
   - "IP-CIDR,127.0.0.0/8,DIRECT"
@@ -821,10 +829,17 @@ print_summary() {
 
 公网地址: $PUBLIC_IP
 端口: $PORT
+EOF
+
+    if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
+        echo "Hysteria 2 端口: $HY2_PORT/UDP"
+    fi
+
+    cat <<EOF
 服务端配置: $SING_BOX_CONFIG_PATH
 客户端配置: $client_config
 
-环境：系统依赖已就绪；本机防火墙状态见上一步输出（云安全组仍需你在控制台放行 TCP $PORT）。
+环境：系统依赖已就绪；本机防火墙状态见上一步输出（云安全组仍需你在控制台放行 TCP $PORT$(if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then echo " 与 UDP $HY2_PORT"; fi)）。
 
 下载客户端配置到本地电脑：
 EOF
@@ -849,6 +864,17 @@ EOF
 
 导入到 Clash Verge 或 CMFA 即可使用。
 EOF
+
+    if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
+        cat <<EOF
+
+配置内含两个节点（vps-vpn-hy2 / vps-vpn），默认走 "自动切换"：
+  - vps-vpn-hy2   Hysteria 2，走 UDP $HY2_PORT，弱网/丢包环境下更快（默认首选）
+  - vps-vpn       VLESS + REALITY，走 TCP $PORT，UDP 被封锁时自动顶上（备用）
+  - "自动切换"    fallback 组：HY2 健康检查失败时自动切到 VLESS
+你也可以在 Global 策略组里手动固定其中任一节点。
+EOF
+    fi
 
     if [[ "${IP_DETECT_SINGLE:-0}" -eq 1 ]]; then
         echo "提示：公网 IP 仅由单个服务确认，请自行核验为 $PUBLIC_IP"

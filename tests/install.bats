@@ -517,6 +517,23 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     [[ "$output" != *"TOP-SECRET"* ]]
 }
 
+@test "print_summary names the Hysteria 2 UDP port when HY2 is enabled" {
+    USER_NAME="ubuntu"; PUBLIC_IP="1.2.3.4"; PORT=443
+    HY2_PORT=8443; ENABLE_HY2=1
+    run print_summary "/root/vps-vpn/client.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Hysteria 2 端口: 8443/UDP"* ]]
+    [[ "$output" == *"UDP 8443"* ]]
+}
+
+@test "print_summary omits the Hysteria 2 port when --no-hy2 is used" {
+    USER_NAME="ubuntu"; PUBLIC_IP="1.2.3.4"; PORT=443
+    HY2_PORT=8443; ENABLE_HY2=0
+    run print_summary "/root/vps-vpn/client.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"8443"* ]]
+}
+
 # ===========================================================================
 # Final-review fix pass (C1..C4, I1..I4, M1)
 # ===========================================================================
@@ -1078,6 +1095,40 @@ EOF
     [ "$(grep -c 'skip-cert-verify' "$f")" -eq 1 ]
     # the REALITY private key must never leak
     ! grep -q 'priv-key-SECRET' "$f"
+}
+
+@test "hy2: Global defaults to the auto-failover group" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    local f="$STATE_DIR/client.yaml"
+    mapfile -t global_block < <(grep -A3 'name: "Global"' "$f")
+    [[ "${global_block[1]}" == *'type: select'* ]]
+    # the first entry of a select group is the default selection
+    [[ "${global_block[3]}" == *'"自动切换"'* ]]
+}
+
+@test "hy2: auto-failover group prefers HY2 and falls back to VLESS" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    local f="$STATE_DIR/client.yaml"
+    mapfile -t fb < <(grep -A3 'type: fallback' "$f")
+    grep -q 'name: "自动切换"' "$f"
+    # HY2 is primary, VLESS is the backup
+    [[ "${fb[2]}" == *'"vps-vpn-hy2"'* ]]
+    [[ "${fb[3]}" == *'"vps-vpn"'* ]]
+    # health check must exist, otherwise fallback never triggers
+    grep -q 'url: "https://www.gstatic.com/generate_204"' "$f"
+    grep -q 'interval: 300' "$f"
 }
 
 @test "hy2: check_port_available works for a UDP port" {
