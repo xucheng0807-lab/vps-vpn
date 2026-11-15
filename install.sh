@@ -645,9 +645,19 @@ check_environment() {
         echo "错误：仅支持 Ubuntu（检测到 ID=$id）" >&2
         return 1
     fi
+    # Require Ubuntu >= 22.04. 22.04 / 24.04 are the verified LTS releases;
+    # any newer LTS (e.g. 26.04) is allowed with a soft warning rather than a
+    # hard block, and releases older than 22.04 are rejected.
     case "$ver" in
-        22.04|24.04) ;;
-        *) echo "错误：仅支持 Ubuntu 22.04 或 24.04（检测到版本 $ver）" >&2; return 1 ;;
+        22.04|24.04) ;;  # verified
+        *)
+            if [[ "$ver" =~ ^([0-9]{2})\.([0-9]{2})$ ]] && (( 10#${BASH_REMATCH[1]} >= 22 )); then
+                echo "提示：Ubuntu $ver 未在本项目实测验证，将按兼容模式继续安装" >&2
+            else
+                echo "错误：仅支持 Ubuntu 22.04 及以上的 LTS（检测到版本 $ver）" >&2
+                return 1
+            fi
+            ;;
     esac
     case "$arch" in
         x86_64|amd64|aarch64|arm64) ;;
