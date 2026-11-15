@@ -760,15 +760,26 @@ check_port_available() {
 }
 
 # Best-effort listening-port check. Advisory only: proves the unit bound the
-# port locally, never claims public reachability.
+# port locally, never claims public reachability. sing-box needs a moment after
+# `systemctl restart` before it binds, so poll instead of checking once — a
+# single-shot check produced a false "not listening" warning on healthy hosts.
+# Attempts/delay are overridable so tests need not sleep.
 check_listening() {
     local port="$1"
+    local attempts="${LISTEN_CHECK_ATTEMPTS:-30}"
+    local delay="${LISTEN_CHECK_DELAY:-0.2}"
+    local i
     command -v ss >/dev/null 2>&1 || return 0
-    if ss -ltn 2>/dev/null | grep -q ":$port "; then
-        echo "TCP $port 正在监听" >&2
-    else
-        echo "警告：未检测到 TCP $port 监听，请检查服务日志" >&2
-    fi
+    for (( i = 0; i < attempts; i++ )); do
+        if ss -ltn 2>/dev/null | grep -q ":$port "; then
+            echo "TCP $port 正在监听" >&2
+            return 0
+        fi
+        if (( i + 1 < attempts )); then
+            sleep "$delay" 2>/dev/null || true
+        fi
+    done
+    echo "警告：未检测到 TCP $port 监听，请检查服务日志" >&2
     return 0
 }
 
@@ -820,6 +831,12 @@ restore_config() {
 # and service commands — never UUID, keys or full YAML.
 print_summary() {
     local client_config="$1"
+    # HY2_PORT is only set once parse_args/generate_credentials have run; keep
+    # the summary usable when it is missing (partial calls, --no-hy2 paths).
+    local hy2_port=""
+    if [[ "${ENABLE_HY2:-1}" -eq 1 && -n "${HY2_PORT:-}" ]]; then
+        hy2_port="$HY2_PORT"
+    fi
 
     cat <<EOF
 
@@ -831,15 +848,15 @@ print_summary() {
 端口: $PORT
 EOF
 
-    if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
-        echo "Hysteria 2 端口: $HY2_PORT/UDP"
+    if [[ -n "$hy2_port" ]]; then
+        echo "Hysteria 2 端口: $hy2_port/UDP"
     fi
 
     cat <<EOF
 服务端配置: $SING_BOX_CONFIG_PATH
 客户端配置: $client_config
 
-环境：系统依赖已就绪；本机防火墙状态见上一步输出（云安全组仍需你在控制台放行 TCP $PORT$(if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then echo " 与 UDP $HY2_PORT"; fi)）。
+环境：系统依赖已就绪；本机防火墙状态见上一步输出（云安全组仍需你在控制台放行 TCP $PORT$([[ -n "$hy2_port" ]] && echo " 与 UDP $hy2_port")）。
 
 下载客户端配置到本地电脑：
 EOF
@@ -865,11 +882,11 @@ EOF
 导入到 Clash Verge 或 CMFA 即可使用。
 EOF
 
-    if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
+    if [[ -n "$hy2_port" ]]; then
         cat <<EOF
 
 配置内含两个节点（vps-vpn-hy2 / vps-vpn），默认走 "自动切换"：
-  - vps-vpn-hy2   Hysteria 2，走 UDP $HY2_PORT，弱网/丢包环境下更快（默认首选）
+  - vps-vpn-hy2   Hysteria 2，走 UDP $hy2_port，弱网/丢包环境下更快（默认首选）
   - vps-vpn       VLESS + REALITY，走 TCP $PORT，UDP 被封锁时自动顶上（备用）
   - "自动切换"    fallback 组：HY2 健康检查失败时自动切到 VLESS
 你也可以在 Global 策略组里手动固定其中任一节点。

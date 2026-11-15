@@ -1131,6 +1131,42 @@ EOF
     grep -q 'interval: 300' "$f"
 }
 
+@test "check_listening reports the port once it is bound" {
+    ss() { printf 'LISTEN 0 4096 *:443 *:*\n'; }
+    export -f ss
+    LISTEN_CHECK_ATTEMPTS=2; LISTEN_CHECK_DELAY=0
+    run check_listening 443
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TCP 443 正在监听"* ]]
+}
+
+@test "check_listening retries while sing-box is still binding the port" {
+    SS_CALLS="$(mktemp)"; export SS_CALLS
+    ss() {
+        local n
+        n=$(wc -l < "$SS_CALLS" 2>/dev/null || echo 0)
+        echo x >> "$SS_CALLS"
+        # sing-box needs a moment after `systemctl restart` before it binds.
+        if [ "$n" -ge 2 ]; then printf 'LISTEN 0 4096 *:443 *:*\n'; fi
+        return 0
+    }
+    export -f ss
+    LISTEN_CHECK_ATTEMPTS=5; LISTEN_CHECK_DELAY=0
+    run check_listening 443
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TCP 443 正在监听"* ]]
+    [[ "$output" != *"警告"* ]]
+}
+
+@test "check_listening warns only after every attempt fails" {
+    ss() { return 0; }
+    export -f ss
+    LISTEN_CHECK_ATTEMPTS=3; LISTEN_CHECK_DELAY=0
+    run check_listening 443
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"警告：未检测到 TCP 443 监听"* ]]
+}
+
 @test "hy2: check_port_available works for a UDP port" {
     lsof() { return 1; }
     ss() { return 1; }
