@@ -5,7 +5,6 @@ SCRIPT_NAME="vps-vpn"
 # shellcheck disable=SC2034  # consumed by state/config functions defined below
 STATE_DIR="${STATE_DIR:-/root/vps-vpn}"
 DEFAULT_PORT=443
-DEFAULT_HY2_PORT=8443
 
 usage() {
     cat <<EOF
@@ -27,7 +26,10 @@ parse_args() {
     PORT="$DEFAULT_PORT"
     PORT_EXPLICIT=0
     SKIP_DEPS=0
-    HY2_PORT="$DEFAULT_HY2_PORT"
+    # Deliberately empty: generate_credentials calls choose_hy2_port() when this
+    # is unset. Pre-filling it here made that fallback unreachable, so every
+    # install kept landing on the old fixed port.
+    HY2_PORT=""
     HY2_PORT_EXPLICIT=0
     ENABLE_HY2=1
     while [[ $# -gt 0 ]]; do
