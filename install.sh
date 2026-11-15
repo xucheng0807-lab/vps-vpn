@@ -5,6 +5,7 @@ SCRIPT_NAME="vps-vpn"
 # shellcheck disable=SC2034  # consumed by state/config functions defined below
 STATE_DIR="${STATE_DIR:-/root/vps-vpn}"
 DEFAULT_PORT=443
+DEFAULT_HY2_PORT=8443
 
 usage() {
     cat <<EOF
@@ -13,6 +14,8 @@ Usage: $SCRIPT_NAME [OPTIONS]
 Options:
   --ip IP       手动指定公网 IPv4 地址（默认自动检测）
   --port PORT   指定 VLESS 端口（默认 443）
+  --hy2-port PORT  指定 Hysteria 2 的 UDP 端口（默认 8443）
+  --no-hy2      不部署 Hysteria 2，仅保留 VLESS + REALITY
   --skip-deps   跳过自动安装系统依赖（已自行备好环境时使用）
   --help        显示此帮助信息
 EOF
@@ -24,6 +27,9 @@ parse_args() {
     PORT="$DEFAULT_PORT"
     PORT_EXPLICIT=0
     SKIP_DEPS=0
+    HY2_PORT="$DEFAULT_HY2_PORT"
+    HY2_PORT_EXPLICIT=0
+    ENABLE_HY2=1
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --ip)
@@ -44,6 +50,20 @@ parse_args() {
                 PORT="$2"
                 PORT_EXPLICIT=1
                 shift 2
+                ;;
+            --hy2-port)
+                [[ $# -ge 2 ]] || { echo "错误：--hy2-port 需要一个参数" >&2; usage 2; }
+                if ! [[ "$2" =~ ^[0-9]+$ ]] || (( 10#$2 < 1 || 10#$2 > 65535 )); then
+                    echo "错误：--hy2-port 必须是 1-65535 之间的端口号: $2" >&2
+                    usage 2
+                fi
+                HY2_PORT="$2"
+                HY2_PORT_EXPLICIT=1
+                shift 2
+                ;;
+            --no-hy2)
+                ENABLE_HY2=0
+                shift
                 ;;
             --skip-deps)
                 SKIP_DEPS=1
@@ -188,6 +208,51 @@ parse_keypair() {
     [[ -n "${REALITY_PRIVATE_KEY:-}" && -n "${REALITY_PUBLIC_KEY:-}" ]] || return 1
 }
 
+# Self-signed certificate for Hysteria 2 (required: hysteria2 has no REALITY).
+# Reuses an existing pair so re-runs do not invalidate deployed clients.
+generate_hy2_cert() {
+    local crt="$STATE_DIR/hy2.crt" key="$STATE_DIR/hy2.key"
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR"
+    if [[ -s "$crt" && -s "$key" ]]; then
+        return 0
+    fi
+    local tmpkey tmpcrt
+    tmpkey=$(mktemp "$STATE_DIR/.hy2.key.XXXXXX")
+    tmpcrt=$(mktemp "$STATE_DIR/.hy2.crt.XXXXXX")
+    # MSYS/Git-Bash rewrites a leading "/CN=..." into a Windows path, so the
+    # subject is passed via a config file instead of -subj. Works on Linux too.
+    local cfg
+    cfg=$(mktemp "$STATE_DIR/.hy2.cnf.XXXXXX")
+    cat > "$cfg" <<'CNF'
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = vps-vpn
+[v3]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:vps-vpn
+CNF
+    if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$tmpkey" -out "$tmpcrt" -days 3650 -nodes \
+        -config "$cfg" >/dev/null 2>&1; then
+        echo "错误：无法生成 Hysteria 2 自签证书" >&2
+        rm -f "$tmpkey" "$tmpcrt" "$cfg"
+        return 1
+    fi
+    rm -f "$cfg"
+    chmod 600 "$tmpkey" "$tmpcrt"
+    mv -f "$tmpkey" "$key"
+    mv -f "$tmpcrt" "$crt"
+    chmod 600 "$key"
+    chmod 600 "$crt"
+    echo "已生成 Hysteria 2 自签证书" >&2
+}
+
 generate_credentials() {
     if [[ -f "$STATE_DIR/state.env" ]]; then
         echo "加载已有凭据..." >&2
@@ -197,6 +262,10 @@ generate_credentials() {
             PORT="$STATE_PORT"
         elif [[ "${PORT_EXPLICIT:-0}" -eq 1 && "${STATE_PORT:-}" != "$PORT" ]]; then
             # Explicit new port differs from state: persist it (M1).
+            save_state
+        fi
+        # Same reuse rule for the Hysteria 2 port.
+        if [[ "${HY2_PORT_EXPLICIT:-0}" -eq 1 && -n "${STATE_HY2_PORT:-}" && "${STATE_HY2_PORT}" != "$HY2_PORT" ]]; then
             save_state
         fi
         return 0
@@ -214,6 +283,9 @@ generate_credentials() {
     parse_keypair "$keypair" || { echo "错误：解析 REALITY 密钥对失败" >&2; return 1; }
 
     SHORT_ID=$(openssl rand -hex 4)
+    # Hysteria 2 credentials: random port if not given, strong password.
+    HY2_PORT="${HY2_PORT:-$DEFAULT_HY2_PORT}"
+    HY2_PASSWORD=$(openssl rand -hex 16)
     save_state
 }
 
@@ -237,6 +309,11 @@ load_state() {
             PORT)
                 [[ "$value" =~ ^[0-9]+$ ]] || { echo "错误：state.env 中 PORT 格式无效" >&2; return 1; }
                 STATE_PORT="$value" ;;
+            HY2_PORT)
+                [[ "$value" =~ ^[0-9]+$ ]] || { echo "错误：state.env 中 HY2_PORT 格式无效" >&2; return 1; }
+                HY2_PORT="$value"
+                STATE_HY2_PORT="$value" ;;
+            HY2_PASSWORD) HY2_PASSWORD="$value" ;;
             *) ;;  # unknown key: ignore, never evaluate
         esac
         n=$((n + 1))
@@ -263,6 +340,8 @@ save_state() {
         printf 'SHORT_ID=%s\n' "$SHORT_ID"
         printf 'PORT=%s\n' "$PORT"
         printf 'PUBLIC_IP=%s\n' "${PUBLIC_IP:-}"
+        printf 'HY2_PORT=%s\n' "${HY2_PORT:-}"
+        printf 'HY2_PASSWORD=%s\n' "${HY2_PASSWORD:-}"
     } > "$tmp"
     mv -f "$tmp" "$STATE_DIR/state.env"
     chmod 600 "$STATE_DIR/state.env"
@@ -315,6 +394,69 @@ server_template() {
 JSON
 }
 
+# Embedded server template WITH the optional Hysteria 2 inbound. Kept as a
+# separate heredoc so the VLESS-only path stays byte-identical and easy to
+# verify when --no-hy2 is used.
+server_template_hy2() {
+    cat <<'JSON'
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "::",
+      "listen_port": {{PORT}},
+      "users": [
+        {
+          "uuid": "{{UUID}}",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "{{REALITY_TARGET}}",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "{{REALITY_TARGET}}",
+            "server_port": 443
+          },
+          "private_key": "{{REALITY_PRIVATE_KEY}}",
+          "short_id": ["{{SHORT_ID}}"]
+        }
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": {{HY2_PORT}},
+      "users": [
+        {
+          "password": "{{HY2_PASSWORD}}"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "{{REALITY_TARGET}}",
+        "alpn": ["h3"],
+        "certificate_path": "{{HY2_CERT}}",
+        "key_path": "{{HY2_KEY}}"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct"
+    }
+  ]
+}
+JSON
+}
+
 # Render the server JSON from the embedded template. Dynamic values are already
 # format-validated upstream; they contain no chars JSON would misinterpret.
 # Prints the file path.
@@ -324,11 +466,23 @@ generate_server_config() {
     mkdir -p "$STATE_DIR"
     local tmp
     tmp=$(mktemp "$STATE_DIR/.server.json.XXXXXX")
-    server_template | sed -e "s/{{PORT}}/$PORT/g" \
-        -e "s/{{UUID}}/$UUID/g" \
-        -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
-        -e "s/{{REALITY_PRIVATE_KEY}}/$REALITY_PRIVATE_KEY/g" \
-        -e "s/{{SHORT_ID}}/$SHORT_ID/g" > "$tmp"
+    if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
+        server_template_hy2 | sed -e "s/{{PORT}}/$PORT/g" \
+            -e "s/{{UUID}}/$UUID/g" \
+            -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
+            -e "s/{{REALITY_PRIVATE_KEY}}/$REALITY_PRIVATE_KEY/g" \
+            -e "s/{{SHORT_ID}}/$SHORT_ID/g" \
+            -e "s|{{HY2_CERT}}|$STATE_DIR/hy2.crt|g" \
+            -e "s|{{HY2_KEY}}|$STATE_DIR/hy2.key|g" \
+            -e "s/{{HY2_PORT}}/$HY2_PORT/g" \
+            -e "s/{{HY2_PASSWORD}}/$HY2_PASSWORD/g" > "$tmp"
+    else
+        server_template | sed -e "s/{{PORT}}/$PORT/g" \
+            -e "s/{{UUID}}/$UUID/g" \
+            -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
+            -e "s/{{REALITY_PRIVATE_KEY}}/$REALITY_PRIVATE_KEY/g" \
+            -e "s/{{SHORT_ID}}/$SHORT_ID/g" > "$tmp"
+    fi
     chmod 600 "$tmp"
     mv -f "$tmp" "$config_file"
     chmod 600 "$config_file"
@@ -389,6 +543,60 @@ dns:
 YAML
 }
 
+# Client template with both nodes. The user switches manually in the
+# "Global" group; nothing auto-selects, so a broken protocol is easy to bypass.
+client_template_hy2() {
+    cat <<'YAML'
+proxies:
+  - name: "vps-vpn"
+    type: vless
+    server: {{PUBLIC_IP}}
+    port: {{PORT}}
+    uuid: {{UUID}}
+    flow: xtls-rprx-vision
+    network: tcp
+    tls: true
+    servername: {{REALITY_TARGET}}
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: {{REALITY_PUBLIC_KEY}}
+      short-id: {{SHORT_ID}}
+  - name: "vps-vpn-hy2"
+    type: hysteria2
+    server: {{PUBLIC_IP}}
+    port: {{HY2_PORT}}
+    password: {{HY2_PASSWORD}}
+    sni: {{REALITY_TARGET}}
+    skip-cert-verify: true
+    up: "100 Mbps"
+    down: "300 Mbps"
+
+proxy-groups:
+  - name: "Global"
+    type: select
+    proxies:
+      - "vps-vpn"
+      - "vps-vpn-hy2"
+
+rules:
+  - "IP-CIDR,127.0.0.0/8,DIRECT"
+  - "IP-CIDR,192.168.0.0/16,DIRECT"
+  - "IP-CIDR,10.0.0.0/8,DIRECT"
+  - "IP-CIDR,172.16.0.0/12,DIRECT"
+  - "MATCH,Global"
+
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+  default-nameserver:
+    - 223.5.5.5
+    - 8.8.8.8
+  nameserver:
+    - https://dns.google/dns-query
+    - https://cloudflare-dns.com/dns-query
+YAML
+}
+
 # Render the Mihomo YAML from the embedded template and, when running as a
 # non-root user, drop a 0600 copy into that user's home. Never emits the
 # REALITY private key. Prints the main config path.
@@ -399,12 +607,23 @@ generate_client_config() {
     mkdir -p "$STATE_DIR"
     local tmp
     tmp=$(mktemp "$STATE_DIR/.client.yaml.XXXXXX")
-    client_template | sed -e "s/{{PUBLIC_IP}}/$PUBLIC_IP/g" \
-        -e "s/{{PORT}}/$PORT/g" \
-        -e "s/{{UUID}}/$UUID/g" \
-        -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
-        -e "s/{{REALITY_PUBLIC_KEY}}/$REALITY_PUBLIC_KEY/g" \
-        -e "s/{{SHORT_ID}}/$SHORT_ID/g" > "$tmp"
+    if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
+        client_template_hy2 | sed -e "s/{{PUBLIC_IP}}/$PUBLIC_IP/g" \
+            -e "s/{{PORT}}/$PORT/g" \
+            -e "s/{{UUID}}/$UUID/g" \
+            -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
+            -e "s/{{REALITY_PUBLIC_KEY}}/$REALITY_PUBLIC_KEY/g" \
+            -e "s/{{SHORT_ID}}/$SHORT_ID/g" \
+            -e "s/{{HY2_PORT}}/$HY2_PORT/g" \
+            -e "s/{{HY2_PASSWORD}}/$HY2_PASSWORD/g" > "$tmp"
+    else
+        client_template | sed -e "s/{{PUBLIC_IP}}/$PUBLIC_IP/g" \
+            -e "s/{{PORT}}/$PORT/g" \
+            -e "s/{{UUID}}/$UUID/g" \
+            -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
+            -e "s/{{REALITY_PUBLIC_KEY}}/$REALITY_PUBLIC_KEY/g" \
+            -e "s/{{SHORT_ID}}/$SHORT_ID/g" > "$tmp"
+    fi
     chmod 600 "$tmp"
     mv -f "$tmp" "$main_config"
     chmod 600 "$main_config"
@@ -722,14 +941,20 @@ ensure_dependencies() {
     echo "依赖已安装完成" >&2
 }
 
-# If ufw is installed AND active, allow the proxy TCP port. Never disables
-# ufw, never removes rules, never touches SSH. Skips silently otherwise.
+# If ufw is installed AND active, allow the given ports. First argument is the
+# VLESS TCP port; an optional second argument is the Hysteria 2 UDP port.
+# Never disables ufw, never removes rules, never touches SSH.
 configure_firewall() {
-    local port="$1"
+    local tcp_port="$1"
+    local udp_port="${2:-}"
     command -v ufw >/dev/null 2>&1 || return 0
     if ufw status 2>/dev/null | grep -q 'Status: active'; then
-        ufw allow "$port"/tcp >/dev/null 2>&1 || true
-        echo "已放行本机防火墙 TCP 端口 $port" >&2
+        ufw allow "$tcp_port"/tcp >/dev/null 2>&1 || true
+        echo "已放行本机防火墙 TCP 端口 $tcp_port" >&2
+        if [[ -n "$udp_port" ]]; then
+            ufw allow "$udp_port"/udp >/dev/null 2>&1 || true
+            echo "已放行本机防火墙 UDP 端口 $udp_port" >&2
+        fi
     fi
     return 0
 }
@@ -759,6 +984,11 @@ main() {
     check_port_available "$PORT"
     generate_credentials
 
+    if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
+        generate_hy2_cert || exit 1
+        check_port_available "$HY2_PORT"
+    fi
+
     local new_config
     new_config=$(generate_server_config)
 
@@ -779,7 +1009,7 @@ main() {
     fi
 
     check_listening "$PORT"
-    configure_firewall "$PORT"
+    configure_firewall "$PORT" "$([[ "${ENABLE_HY2:-1}" -eq 1 ]] && echo "$HY2_PORT")"
 
     local client_config
     client_config=$(generate_client_config)
