@@ -13,6 +13,7 @@ Usage: $SCRIPT_NAME [OPTIONS]
 Options:
   --ip IP       手动指定公网 IPv4 地址（默认自动检测）
   --port PORT   指定 VLESS 端口（默认 443）
+  --skip-deps   跳过自动安装系统依赖（已自行备好环境时使用）
   --help        显示此帮助信息
 EOF
     exit "${1:-0}"
@@ -22,6 +23,7 @@ parse_args() {
     IP=""
     PORT="$DEFAULT_PORT"
     PORT_EXPLICIT=0
+    SKIP_DEPS=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --ip)
@@ -42,6 +44,10 @@ parse_args() {
                 PORT="$2"
                 PORT_EXPLICIT=1
                 shift 2
+                ;;
+            --skip-deps)
+                SKIP_DEPS=1
+                shift
                 ;;
             --help)
                 usage 0
@@ -574,6 +580,8 @@ print_summary() {
 服务端配置: $SING_BOX_CONFIG_PATH
 客户端配置: $client_config
 
+环境：系统依赖已就绪；本机防火墙状态见上一步输出（云安全组仍需你在控制台放行 TCP $PORT）。
+
 下载客户端配置到本地电脑：
 EOF
 
@@ -614,8 +622,105 @@ EOF
 EOF
 }
 
+# --- environment bootstrap --------------------------------------------------
+
+# Validate the host: supported Ubuntu version, architecture and root rights.
+# Overridable for tests via OS_RELEASE_FILE / ARCH_OVERRIDE / EUID_OVERRIDE.
+check_environment() {
+    local os_file="${OS_RELEASE_FILE:-/etc/os-release}"
+    local arch="${ARCH_OVERRIDE:-$(uname -m)}"
+    local uid="${EUID_OVERRIDE:-$EUID}"
+    local id="" ver=""
+
+    if [[ ! -r "$os_file" ]]; then
+        echo "错误：无法读取 $os_file，无法确认操作系统" >&2
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    id=$(. "$os_file" 2>/dev/null; echo "${ID:-}")
+    # shellcheck source=/dev/null
+    ver=$(. "$os_file" 2>/dev/null; echo "${VERSION_ID:-}")
+
+    if [[ "$id" != "ubuntu" ]]; then
+        echo "错误：仅支持 Ubuntu（检测到 ID=$id）" >&2
+        return 1
+    fi
+    case "$ver" in
+        22.04|24.04) ;;
+        *) echo "错误：仅支持 Ubuntu 22.04 或 24.04（检测到版本 $ver）" >&2; return 1 ;;
+    esac
+    case "$arch" in
+        x86_64|amd64|aarch64|arm64) ;;
+        *) echo "错误：仅支持 amd64/arm64 架构（检测到 $arch）" >&2; return 1 ;;
+    esac
+    if [[ "$uid" -ne 0 ]]; then
+        echo "错误：需要 root 权限运行（请使用 sudo）" >&2
+        return 1
+    fi
+}
+
+# Ensure required system tools exist, installing missing ones via apt when
+# possible. Idempotent; SKIP_DEPS=1 short-circuits. Non-apt systems must
+# already have the tools or we fail with a manual-install hint.
+ensure_dependencies() {
+    local need=() tool pkg
+    # tool -> apt package (empty = supplied by an already-required package)
+    local -A pkg_of=(
+        [curl]=curl [openssl]=openssl [sed]=sed [awk]=gawk
+        [ip]=iproute2 [ss]=iproute2 [getent]=libc-bin [lsof]=lsof
+    )
+
+    for tool in curl openssl sed awk ip ss getent lsof; do
+        command -v "$tool" >/dev/null 2>&1 || need+=("$tool")
+    done
+
+    if [[ ${#need[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    if [[ "${SKIP_DEPS:-0}" -eq 1 ]]; then
+        echo "提示：--skip-deps 已启用，跳过自动安装；缺失命令: ${need[*]}" >&2
+        return 0
+    fi
+
+    if ! command -v apt-get >/dev/null 2>&1; then
+        echo "错误：缺少命令: ${need[*]}，且未找到 apt-get，请手动安装后重试或使用 --skip-deps" >&2
+        return 1
+    fi
+
+    # Collect unique package names for the missing tools.
+    local -a pkgs=()
+    for tool in "${need[@]}"; do
+        pkg="${pkg_of[$tool]:-$tool}"
+        [[ -n "$pkg" ]] || continue
+        case " ${pkgs[*]-} " in *" $pkg "*) ;; *) pkgs+=("$pkg") ;; esac
+    done
+
+    echo "安装缺失依赖: ${pkgs[*]}..." >&2
+    DEBIAN_FRONTEND=noninteractive apt-get update -y >&2 || true
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}" >&2; then
+        echo "错误：依赖安装失败，请检查网络或源后重试" >&2
+        return 1
+    fi
+    echo "依赖已安装完成" >&2
+}
+
+# If ufw is installed AND active, allow the proxy TCP port. Never disables
+# ufw, never removes rules, never touches SSH. Skips silently otherwise.
+configure_firewall() {
+    local port="$1"
+    command -v ufw >/dev/null 2>&1 || return 0
+    if ufw status 2>/dev/null | grep -q 'Status: active'; then
+        ufw allow "$port"/tcp >/dev/null 2>&1 || true
+        echo "已放行本机防火墙 TCP 端口 $port" >&2
+    fi
+    return 0
+}
+
 main() {
     parse_args "$@"
+    check_environment
+    ensure_dependencies
     detect_user_context
 
     if [[ -n "$IP" ]]; then
@@ -628,7 +733,7 @@ main() {
     echo "使用公网 IP: $PUBLIC_IP"
 
     if [[ "${IPTEST:-0}" -eq 1 ]]; then
-        return 0  # test seam: stop after IP+user detection
+        return 0  # test seam: stop after env+deps+user+IP detection
     fi
 
     # sing-box must exist before we can generate keys or check configs.
@@ -657,6 +762,7 @@ main() {
     fi
 
     check_listening "$PORT"
+    configure_firewall "$PORT"
 
     local client_config
     client_config=$(generate_client_config)
