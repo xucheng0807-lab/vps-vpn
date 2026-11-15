@@ -451,7 +451,11 @@ validate_client_config() {
 
 # --- install & service ------------------------------------------------------
 
-readonly SING_BOX_VERSION="1.10.0"
+# Pinned version. Must be >= 1.11: sing-box 1.10.0 has a REALITY defect that
+# rejects every client with "REALITY: processed invalid connection" even when
+# uuid/public_key/short_id all match (verified on a real VPS: 1.10.0 always
+# fails, 1.14.4 works with an identical config).
+readonly SING_BOX_VERSION="1.14.4"
 # System config path; overridable for tests, real path used on a VPS.
 SING_BOX_CONFIG_PATH="${SING_BOX_CONFIG_PATH:-/etc/sing-box/config.json}"
 

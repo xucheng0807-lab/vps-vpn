@@ -164,9 +164,14 @@ sudo journalctl -u sing-box -n 50
 - ✅ 单元测试（BATS）
 - ✅ 配置生成测试
 - ✅ 错误处理与备份恢复测试
-- ⏳ 真实 VPS 部署测试（待用户购买 VPS 后进行）
+- ✅ 真实 VPS 部署测试（Ubuntu 24.04.5 LTS / AWS，sing-box 1.14.4）
+- ✅ 服务端链路验证（公网 443 可达、REALITY 伪装证书正常、回环隧道出口 IP 正确）
 - ⏳ Clash Verge 客户端测试（待用户测试）
 - ⏳ CMFA 客户端测试（待用户测试）
+
+## 版本说明
+
+脚本固定安装 **sing-box 1.14.4**。请勿降级到 1.10.0 或更低版本：1.10.0 存在 REALITY 缺陷，即使 UUID、公钥、short ID 全部匹配，服务端仍会拒绝所有客户端连接并记录 `REALITY: processed invalid connection`（已在真实 VPS 上复现并确认：同一份配置在 1.10.0 上必然失败，在 1.14.4 上正常工作）。
 
 ## 许可证
 
