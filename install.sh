@@ -1043,6 +1043,54 @@ configure_firewall() {
     return 0
 }
 
+# Enable BBR for the TCP leg (VLESS). Hysteria 2 rides QUIC/UDP and does its own
+# congestion control, so this only helps VLESS — but on a lossy long-haul path
+# the difference between CUBIC and BBR is large, because CUBIC reads loss as
+# congestion and collapses the window.
+#
+# Advisory only: a kernel without tcp_bbr, or a container that cannot write
+# /proc/sys, must not fail the install. Paths are overridable for tests.
+enable_bbr() {
+    local sysctl_dir="${SYSCTL_DIR:-/etc/sysctl.d}"
+    local modules_dir="${MODULES_DIR:-/etc/modules-load.d}"
+    local apply="${SYSCTL_APPLY:-1}"
+    local available
+
+    # Ask the kernel what it can actually do. modprobe first so a modular BBR
+    # shows up in tcp_available_congestion_control.
+    modprobe tcp_bbr >/dev/null 2>&1 || true
+    available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "")
+
+    if [[ "$available" != *bbr* ]]; then
+        echo "提示：当前内核不支持 BBR（可用: ${available:-未知}），跳过 TCP 加速" >&2
+        return 0
+    fi
+
+    # Persist the module so BBR survives a reboot even when it is not built in.
+    if mkdir -p "$modules_dir" 2>/dev/null; then
+        printf 'tcp_bbr\n' > "$modules_dir/bbr.conf" 2>/dev/null || true
+    fi
+
+    if mkdir -p "$sysctl_dir" 2>/dev/null; then
+        # Truncate rather than append: re-running must not stack duplicates.
+        {
+            printf 'net.core.default_qdisc = fq\n'
+            printf 'net.ipv4.tcp_congestion_control = bbr\n'
+        } > "$sysctl_dir/99-bbr.conf" 2>/dev/null || true
+    fi
+
+    if [[ "$apply" -eq 1 ]]; then
+        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+        if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")" == "bbr" ]]; then
+            echo "已启用 BBR 拥塞控制（改善 VLESS 在丢包链路上的吞吐）" >&2
+        else
+            echo "提示：BBR 配置已写入，但当前未生效（重启后生效）" >&2
+        fi
+    fi
+    return 0
+}
+
 main() {
     parse_args "$@"
     check_environment
@@ -1093,6 +1141,7 @@ main() {
     fi
 
     check_listening "$PORT"
+    enable_bbr
     configure_firewall "$PORT" "$([[ "${ENABLE_HY2:-1}" -eq 1 ]] && echo "$HY2_PORT")"
 
     local client_config

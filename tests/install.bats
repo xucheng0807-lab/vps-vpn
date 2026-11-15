@@ -1186,6 +1186,89 @@ EOF
     grep -q 'MATCH,Global' "$f"
 }
 
+# --- BBR -------------------------------------------------------------------
+
+# The test host's kernel may not expose bbr, so every test that expects the
+# write path to run must stub sysctl to report bbr as available.
+_bbr_stub_sysctl() {
+    sysctl() {
+        case "$*" in
+            *"-n net.ipv4.tcp_available_congestion_control"*) printf 'reno cubic bbr\n' ;;
+            *"-n net.ipv4.tcp_congestion_control"*) printf 'bbr\n' ;;
+            *) return 0 ;;
+        esac
+    }
+    modprobe() { return 0; }
+    export -f sysctl modprobe
+}
+
+@test "bbr: writes a sysctl drop-in that sets bbr + fq" {
+    _bbr_stub_sysctl
+    SYSCTL_DIR="$(mktemp -d)"
+    MODULES_DIR="$(mktemp -d)"
+    SYSCTL_APPLY=0
+    run enable_bbr
+    [ "$status" -eq 0 ]
+    local f="$SYSCTL_DIR/99-bbr.conf"
+    [ -f "$f" ]
+    grep -q '^net.core.default_qdisc = fq$' "$f"
+    grep -q '^net.ipv4.tcp_congestion_control = bbr$' "$f"
+}
+
+@test "bbr: loads the tcp_bbr module via modules-load.d" {
+    _bbr_stub_sysctl
+    MODULES_DIR="$(mktemp -d)"
+    SYSCTL_DIR="$(mktemp -d)"
+    SYSCTL_APPLY=0
+    run enable_bbr
+    [ "$status" -eq 0 ]
+    local f="$MODULES_DIR/bbr.conf"
+    [ -f "$f" ]
+    grep -q '^tcp_bbr$' "$f"
+}
+
+@test "bbr: is idempotent on re-run" {
+    _bbr_stub_sysctl
+    SYSCTL_DIR="$(mktemp -d)"
+    MODULES_DIR="$(mktemp -d)"
+    SYSCTL_APPLY=0
+    enable_bbr >/dev/null 2>&1
+    enable_bbr >/dev/null 2>&1
+    [ "$(grep -c 'tcp_congestion_control = bbr' "$SYSCTL_DIR/99-bbr.conf")" -eq 1 ]
+}
+
+@test "bbr: skips gracefully when the kernel has no bbr available" {
+    SYSCTL_DIR="$(mktemp -d)"
+    MODULES_DIR="$(mktemp -d)"
+    SYSCTL_APPLY=0
+    # A kernel built without BBR must not fail the whole install.
+    sysctl() {
+        if [[ "$*" == *"-n net.ipv4.tcp_available_congestion_control"* ]]; then
+            printf 'reno cubic\n'
+            return 0
+        fi
+        return 0
+    }
+    modprobe() { return 0; }
+    export -f sysctl modprobe
+    run enable_bbr
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"不支持"* || "$output" == *"不可用"* || "$output" == *"跳过"* ]]
+    [ ! -f "$SYSCTL_DIR/99-bbr.conf" ]
+}
+
+@test "bbr: never fails the install when writing sysctl is denied" {
+    _bbr_stub_sysctl
+    SYSCTL_DIR="/proc/sys/nonexistent-dir-for-test"
+    MODULES_DIR="/proc/sys/nonexistent-dir-for-test"
+    SYSCTL_APPLY=0
+    run enable_bbr
+    # Advisory only: a container without /proc/sys write access still installs.
+    [ "$status" -eq 0 ]
+}
+
+# --- BBR -------------------------------------------------------------------
+
 @test "check_listening reports the port once it is bound" {
     ss() { printf 'LISTEN 0 4096 *:443 *:*\n'; }
     export -f ss
