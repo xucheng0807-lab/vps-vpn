@@ -209,21 +209,20 @@ parse_keypair() {
 }
 
 # Self-signed certificate for Hysteria 2 (required: hysteria2 has no REALITY).
+# Certs go under SING_BOX_CERT_DIR (/etc/sing-box), NOT /root/vps-vpn: the
+# service runs as the unprivileged "sing-box" user and cannot traverse /root.
 # Reuses an existing pair so re-runs do not invalidate deployed clients.
 generate_hy2_cert() {
-    local crt="$STATE_DIR/hy2.crt" key="$STATE_DIR/hy2.key"
-    mkdir -p "$STATE_DIR"
-    chmod 700 "$STATE_DIR"
+    local dir="${SING_BOX_CERT_DIR:-/etc/sing-box}"
+    local crt="$dir/hy2.crt" key="$dir/hy2.key"
+    mkdir -p "$dir"
     if [[ -s "$crt" && -s "$key" ]]; then
         return 0
     fi
-    local tmpkey tmpcrt
-    tmpkey=$(mktemp "$STATE_DIR/.hy2.key.XXXXXX")
-    tmpcrt=$(mktemp "$STATE_DIR/.hy2.crt.XXXXXX")
-    # MSYS/Git-Bash rewrites a leading "/CN=..." into a Windows path, so the
-    # subject is passed via a config file instead of -subj. Works on Linux too.
-    local cfg
-    cfg=$(mktemp "$STATE_DIR/.hy2.cnf.XXXXXX")
+    local tmpkey tmpcrt cfg
+    tmpkey=$(mktemp)
+    tmpcrt=$(mktemp)
+    cfg=$(mktemp)
     cat > "$cfg" <<'CNF'
 [req]
 distinguished_name = dn
@@ -245,9 +244,14 @@ CNF
         return 1
     fi
     rm -f "$cfg"
-    chmod 600 "$tmpkey" "$tmpcrt"
-    mv -f "$tmpkey" "$key"
-    mv -f "$tmpcrt" "$crt"
+    # Move into place, then hand ownership to the service user so it can read.
+    install -m 600 "$tmpkey" "$key"
+    install -m 600 "$tmpcrt" "$crt"
+    rm -f "$tmpkey" "$tmpcrt"
+    local svc="${SING_BOX_SERVICE_USER:-sing-box}"
+    if id "$svc" >/dev/null 2>&1; then
+        chown "$svc:$svc" "$key" "$crt" 2>/dev/null || true
+    fi
     chmod 600 "$key"
     chmod 600 "$crt"
     echo "已生成 Hysteria 2 自签证书" >&2
@@ -486,8 +490,8 @@ generate_server_config() {
             -e "s/{{REALITY_TARGET}}/$REALITY_TARGET/g" \
             -e "s/{{REALITY_PRIVATE_KEY}}/$REALITY_PRIVATE_KEY/g" \
             -e "s/{{SHORT_ID}}/$SHORT_ID/g" \
-            -e "s|{{HY2_CERT}}|$STATE_DIR/hy2.crt|g" \
-            -e "s|{{HY2_KEY}}|$STATE_DIR/hy2.key|g" \
+            -e "s|{{HY2_CERT}}|${SING_BOX_CERT_DIR:-/etc/sing-box}/hy2.crt|g" \
+            -e "s|{{HY2_KEY}}|${SING_BOX_CERT_DIR:-/etc/sing-box}/hy2.key|g" \
             -e "s/{{HY2_PORT}}/$HY2_PORT/g" \
             -e "s/{{HY2_PASSWORD}}/$HY2_PASSWORD/g" > "$tmp"
     else

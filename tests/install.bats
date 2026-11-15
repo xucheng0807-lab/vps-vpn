@@ -992,21 +992,54 @@ EOF
 
 @test "hy2: generate_hy2_cert creates cert and key with 0600" {
     STATE_DIR="$(mktemp -d)"
+    SING_BOX_CERT_DIR="$(mktemp -d)"
     CHMOD_LOG="$(mktemp)"; export CHMOD_LOG
     chmod() { printf '%s\n' "$*" >> "$CHMOD_LOG"; command chmod "$@" 2>/dev/null || true; }
     export -f chmod
     generate_hy2_cert
-    [ -s "$STATE_DIR/hy2.crt" ]
-    [ -s "$STATE_DIR/hy2.key" ]
-    grep -q "600 $STATE_DIR/hy2.key" "$CHMOD_LOG"
+    [ -s "$SING_BOX_CERT_DIR/hy2.crt" ]
+    [ -s "$SING_BOX_CERT_DIR/hy2.key" ]
+    grep -q "600 $SING_BOX_CERT_DIR/hy2.key" "$CHMOD_LOG"
     # a second call must reuse, not regenerate
-    local before; before=$(cat "$STATE_DIR/hy2.crt")
+    local before; before=$(cat "$SING_BOX_CERT_DIR/hy2.crt")
     generate_hy2_cert
-    [ "$(cat "$STATE_DIR/hy2.crt")" = "$before" ]
+    [ "$(cat "$SING_BOX_CERT_DIR/hy2.crt")" = "$before" ]
+}
+
+# Regression: sing-box runs as the unprivileged "sing-box" user, so a cert under
+# /root (0700) is unreadable and hysteria2 silently accepts no connections.
+# Failed for real on a VPS: UDP 8443 listened but every client timed out.
+@test "hy2: certs live outside /root and are readable by the service user" {
+    STATE_DIR="$(mktemp -d)"
+    SING_BOX_CERT_DIR="$(mktemp -d)"
+    generate_hy2_cert
+    # The rendered server config must not point into /root.
+    PORT=443; HY2_PORT=8443; HY2_PASSWORD="pw"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PRIVATE_KEY="priv"; SHORT_ID="abcd1234"; ENABLE_HY2=1
+    cd "$PROJECT_ROOT"
+    generate_server_config >/dev/null
+    local f="$STATE_DIR/sing-box-server.json"
+    ! grep -q '"/root/' "$f"
+    grep -q "$SING_BOX_CERT_DIR/hy2.crt" "$f"
+}
+
+@test "hy2: generate_hy2_cert chowns certs to the service user when it exists" {
+    STATE_DIR="$(mktemp -d)"
+    SING_BOX_CERT_DIR="$(mktemp -d)"
+    SING_BOX_SERVICE_USER="sing-box"
+    CHOWN_LOG="$(mktemp)"; export CHOWN_LOG
+    chown() { printf '%s\n' "$*" >> "$CHOWN_LOG"; command chown "$@" 2>/dev/null || true; }
+    # pretend the service user exists so the chown branch is taken
+    id() { [[ "$1" == "sing-box" ]] && return 0; builtin id "$@" 2>/dev/null; }
+    export -f chown id
+    generate_hy2_cert
+    grep -q "sing-box" "$CHOWN_LOG"
 }
 
 @test "hy2: server config contains a hysteria2 inbound alongside vless" {
     STATE_DIR="$(mktemp -d)"
+    SING_BOX_CERT_DIR="$(mktemp -d)"
     PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
     UUID="11111111-2222-3333-4444-555555555555"
     REALITY_PRIVATE_KEY="priv"; SHORT_ID="abcd1234"
@@ -1133,6 +1166,7 @@ PUBLIC_IP=9.9.9.9
 EOF
     chmod 600 "$STATE_DIR/state.env"
     PORT=443; PUBLIC_IP=9.9.9.9; ENABLE_HY2=1
+    SING_BOX_CERT_DIR="$(mktemp -d)"
     unset HY2_PORT HY2_PASSWORD
     sing-box() { return 0; }
     export -f sing-box
