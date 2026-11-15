@@ -27,41 +27,85 @@
 
 ### 一键安装
 
+登录你的新 VPS（SSH），复制粘贴这一条，回车即可：
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash
 ```
 
-脚本会自动检查环境并安装缺失依赖，无需你手动 `apt install`。
+脚本会自动检查环境、安装缺失依赖、部署服务并打印客户端配置路径，无需你手动 `apt install` 任何东西。
+
+> **非 root 用户登录（如 AWS 的 `ubuntu`）也能直接用**，`sudo` 已包含在命令里。
+> 若 `sudo` 提示输入密码，请先执行 `sudo -v` 预授权，再运行上面的命令。
+
+### 安装完成后
+
+脚本最后会打印一段 `安装完成！` 的摘要，里面有：
+
+- 公网地址、VLESS 端口（默认 443）、Hysteria 2 端口（默认 8443/UDP）
+- 客户端配置文件的绝对路径
+- 一条可直接复制执行的 `scp` 下载命令
+
+把那条 `scp` 命令复制到**你自己的电脑**上执行，就能把 `client.yaml` 下载下来，然后按下面「导入 Clash Verge」操作。
 
 ### 自定义参数（可选）
 
+在命令末尾加 `-s -- 参数`。例如：
+
 ```bash
 # 手动指定公网 IPv4（自动检测失败时使用）
-curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --ip 1.2.3.4
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --ip 1.2.3.4
 
 # 使用自定义 VLESS 端口（默认 443）
-curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --port 8443
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --port 8443
 
 # 使用自定义 Hysteria 2 端口（默认 8443/UDP）
-curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --hy2-port 9443
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --hy2-port 9443
 
 # 只部署 VLESS + REALITY，不部署 Hysteria 2
-curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --no-hy2
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --no-hy2
 
 # 跳过自动安装依赖（已自行备好 curl/openssl 等环境时）
-curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --skip-deps
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --skip-deps
+
+# 查看全部参数
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | bash -s -- --help
 ```
 
-### 使用 sudo 时的注意
+### 关于 `bash <(...)` 写法
 
-`curl | sudo bash` 会占用标准输入，若 sudo 需要交互式密码，请先执行 `sudo -v` 预授权，或在已提升的 shell 中运行脚本。
+你可能见过别的脚本用 `bash <(curl -fsSL ...)` 这种写法。它在本项目里**不能加 `sudo`**：
+
+```bash
+# ❌ 错误：sudo 会关闭进程替换的 fd，报 /dev/fd/63: No such file or directory
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh)
+
+# ✅ 仅在「你已经是 root 登录」时可用
+bash <(curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh)
+```
+
+原因：`sudo` 默认关闭除 stdin/stdout/stderr 以外的所有文件描述符，而 `<(...)` 依赖 `/dev/fd/63` 这类 fd。所以本 README 统一推荐 `curl ... | sudo bash` 这种管道写法，它在任何登录方式下都成立。
+
+### 为什么命令里有 `-fsSL` 这些参数
+
+每个都有实际作用，不是凑数的：
+
+| 参数 | 作用 |
+| --- | --- |
+| `-f` | HTTP 出错（如 404）直接失败，避免把错误页面当脚本执行 |
+| `-s` | 静默模式，不显示下载进度条 |
+| `-S` | 但出错时仍显示错误信息 |
+| `-L` | 跟随 GitHub 的跳转 |
+| `bash -s --` | 让后面的 `--ip`/`--port` 传给脚本，而不是传给 bash 本身 |
 
 ## 客户端配置
 
 安装完成后，客户端配置文件位于：
 
 - 主配置文件（root 拥有）：`/root/vps-vpn/client.yaml`
-- 普通用户副本（若通过 sudo 以普通用户安装）：`/home/<用户名>/vps-vpn/client.yaml`
+- 普通用户副本（若通过 sudo 以普通用户安装）：`/home/<你的登录用户名>/vps-vpn/client.yaml`
+
+`<你的登录用户名>` 就是你的 SSH 登录名（AWS Lightsail 通常是 `ubuntu`，其它厂商可能是 `root`、`debian`、`centos` 等）。脚本安装时会打印「检测到用户: xxx」，照抄即可。
 
 客户端 YAML 包含 UUID、REALITY 公钥与 short ID、HY2 密码，**不包含 REALITY 私钥**。请妥善保管，不要上传到公开仓库。
 
@@ -82,19 +126,24 @@ curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/inst
 
 ### 下载到本地电脑
 
-```bash
-# 使用 scp（替换 <用户名> 与 <VPS_IP>）
-scp <用户名>@<VPS_IP>:/home/<用户名>/vps-vpn/client.yaml .
+安装结束时脚本会直接打印一条可复制的 `scp` 命令，形如（把 `<你的登录用户名>` 换成你的 SSH 用户名，`<VPS_IP>` 换成服务器公网 IP）：
 
-# 或使用 SSH 密钥
-scp -i /path/to/key.pem <用户名>@<VPS_IP>:/home/<用户名>/vps-vpn/client.yaml .
+```bash
+# 普通用户登录（如 AWS 的 ubuntu）
+scp <你的登录用户名>@<VPS_IP>:/home/<你的登录用户名>/vps-vpn/client.yaml .
+
+# 或使用 SSH 密钥（AWS / Lightsail 常用）
+scp -i /path/to/key.pem <你的登录用户名>@<VPS_IP>:/home/<你的登录用户名>/vps-vpn/client.yaml .
 ```
 
-若以 root 安装，则路径为 `/root/vps-vpn/client.yaml`，下载示例：
+若以 root 安装，则路径为 `/root/vps-vpn/client.yaml`：
 
 ```bash
 scp root@<VPS_IP>:/root/vps-vpn/client.yaml .
 ```
+
+> 若 `scp` 报 `Permission denied`，说明文件属主是 root。先登录 VPS 执行
+> `sudo cp /root/vps-vpn/client.yaml /tmp/ && sudo chown $USER /tmp/client.yaml`，再从本地 `scp` 拉取 `/tmp/client.yaml`。
 
 ### 导入 Clash Verge（电脑）
 
@@ -161,18 +210,18 @@ HY2 证书刻意放在 `/etc/sing-box` 而不是 `/root/vps-vpn`：服务以非�
 
 ### 无法自动检测公网 IP
 
-使用 `--ip` 手动指定：
+脚本会尝试三个公共服务（ipify / icanhazip / ifconfig.me）。若都失败或结果不一致，用 `--ip` 手动指定：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --ip <你的IP>
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --ip 1.2.3.4
 ```
 
 ### 端口被占用
 
-换用其他端口：
+换用其他端口（`--port` 是 VLESS 的 TCP 端口，`--hy2-port` 是 HY2 的 UDP 端口）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你的用户名>/vps-vpn/main/install.sh | sudo bash -s -- --port 8443
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --port 8443
 ```
 
 ### 服务启动失败
@@ -203,7 +252,7 @@ sudo journalctl -u sing-box -n 50
 
 真实 YouTube 播放（4K）测得 `Connection Speed`：VLESS 3561 Kbps，HY2 8003 Kbps（**+125%**）。
 
-结论：带宽充裕、线路干净时两者都能跑满；一旦有丢包，HY2 基于 QUIC 的优势明显，所以默认选 HY2、VLESS 兜底。
+结论：带宽充裕、线路干净时两者都能跑满；一旦有丢包，HY2 基于 QUIC 的优势明显。所以日常优先用 `vps-vpn-hy2`，遇到 UDP 被封锁或 HY2 连不上时手动切到 `vps-vpn-vless`。
 
 ## 验证状态
 
