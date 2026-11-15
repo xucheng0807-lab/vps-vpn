@@ -251,6 +251,7 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     STATE_DIR="$(mktemp -d)"
     PORT=443; UUID="11111111-2222-3333-4444-555555555555"
     REALITY_PRIVATE_KEY="priv-key-XYZ"; SHORT_ID="abcd1234"
+    ENABLE_HY2=0
     cd "$PROJECT_ROOT"
     generate_server_config >/dev/null
     local f="$STATE_DIR/sing-box-server.json"
@@ -269,6 +270,7 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     STATE_DIR="$(mktemp -d)"
     PORT=8443; UUID="11111111-2222-3333-4444-555555555555"
     REALITY_PRIVATE_KEY="k"; SHORT_ID="abcd1234"
+    ENABLE_HY2=0
     cd "$PROJECT_ROOT"
     generate_server_config >/dev/null
     local f="$STATE_DIR/sing-box-server.json"
@@ -281,6 +283,7 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     STATE_DIR="$(mktemp -d)"
     PORT=443; UUID="11111111-2222-3333-4444-555555555555"
     REALITY_PRIVATE_KEY="k"; SHORT_ID="abcd1234"
+    ENABLE_HY2=0
     cd "$PROJECT_ROOT"
     CHMOD_LOG="$(mktemp)"; export CHMOD_LOG
     chmod() { printf '%s\n' "$*" >> "$CHMOD_LOG"; command chmod "$@" 2>/dev/null || true; }
@@ -315,6 +318,7 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     REALITY_PUBLIC_KEY="pub-key-ZZZ"; REALITY_PRIVATE_KEY="SECRET-PRIVATE-KEY"
     SHORT_ID="abcd1234"
     mkdir -p "$USER_HOME"
+    ENABLE_HY2=0
     cd "$PROJECT_ROOT"
     generate_client_config >/dev/null
 
@@ -342,6 +346,7 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     PUBLIC_IP="1.2.3.4"; PORT=443
     UUID="11111111-2222-3333-4444-555555555555"
     REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    ENABLE_HY2=0
     cd "$PROJECT_ROOT"
     generate_client_config >/dev/null
     [ -f "$STATE_DIR/client.yaml" ]
@@ -354,6 +359,7 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     PUBLIC_IP="1.2.3.4"; PORT=443
     UUID="11111111-2222-3333-4444-555555555555"
     REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    ENABLE_HY2=0
     cd "$PROJECT_ROOT"
     CHMOD_LOG="$(mktemp)"; export CHMOD_LOG
     chmod() { printf '%s\n' "$*" >> "$CHMOD_LOG"; command chmod "$@" 2>/dev/null || true; }
@@ -373,6 +379,7 @@ _json_ok() { node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf
     UUID="11111111-2222-3333-4444-555555555555"
     REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
     mkdir -p "$USER_HOME"
+    ENABLE_HY2=0
     cd "$PROJECT_ROOT"
     CHOWN_LOG="$(mktemp)"; export CHOWN_LOG
     CHMOD_LOG="$(mktemp)"; export CHMOD_LOG
@@ -936,6 +943,154 @@ EOF
     PORT=8443; PORT_EXPLICIT=1; PUBLIC_IP=9.9.9.9
     generate_credentials >/dev/null
     grep -q '^PORT=8443' "$STATE_DIR/state.env"
+}
+
+# ===========================================================================
+# Feature: Hysteria 2 as a second, coexisting protocol
+# ===========================================================================
+
+@test "hy2: state round-trips HY2_PORT and HY2_PASSWORD" {
+    STATE_DIR="$(mktemp -d)"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PRIVATE_KEY="pk"; REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    PORT=443; PUBLIC_IP="1.2.3.4"
+    HY2_PORT=8443; HY2_PASSWORD="hy2secret"
+    save_state
+    grep -q '^HY2_PORT=8443' "$STATE_DIR/state.env"
+    grep -q '^HY2_PASSWORD=hy2secret' "$STATE_DIR/state.env"
+    # round-trip through load_state
+    UUID=""; SHORT_ID=""; HY2_PORT=""; HY2_PASSWORD=""
+    load_state
+    [ "$HY2_PORT" = "8443" ]
+    [ "$HY2_PASSWORD" = "hy2secret" ]
+}
+
+@test "hy2: load_state rejects malformed HY2_PORT" {
+    STATE_DIR="$(mktemp -d)/state"; mkdir -p "$STATE_DIR"
+    cat > "$STATE_DIR/state.env" <<'EOF'
+UUID=11111111-2222-3333-4444-555555555555
+REALITY_PRIVATE_KEY=pk
+SHORT_ID=abcd1234
+HY2_PORT=notaport
+EOF
+    run load_state
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"HY2_PORT"* ]]
+}
+
+@test "hy2: state.env without HY2 keys still loads (backward compatible)" {
+    STATE_DIR="$(mktemp -d)/state"; mkdir -p "$STATE_DIR"
+    cat > "$STATE_DIR/state.env" <<'EOF'
+UUID=11111111-2222-3333-4444-555555555555
+REALITY_PRIVATE_KEY=pk
+SHORT_ID=abcd1234
+PORT=443
+EOF
+    run load_state
+    [ "$status" -eq 0 ]
+}
+
+@test "hy2: generate_hy2_cert creates cert and key with 0600" {
+    STATE_DIR="$(mktemp -d)"
+    CHMOD_LOG="$(mktemp)"; export CHMOD_LOG
+    chmod() { printf '%s\n' "$*" >> "$CHMOD_LOG"; command chmod "$@" 2>/dev/null || true; }
+    export -f chmod
+    generate_hy2_cert
+    [ -s "$STATE_DIR/hy2.crt" ]
+    [ -s "$STATE_DIR/hy2.key" ]
+    grep -q "600 $STATE_DIR/hy2.key" "$CHMOD_LOG"
+    # a second call must reuse, not regenerate
+    local before; before=$(cat "$STATE_DIR/hy2.crt")
+    generate_hy2_cert
+    [ "$(cat "$STATE_DIR/hy2.crt")" = "$before" ]
+}
+
+@test "hy2: server config contains a hysteria2 inbound alongside vless" {
+    STATE_DIR="$(mktemp -d)"
+    PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PRIVATE_KEY="priv"; SHORT_ID="abcd1234"
+    generate_hy2_cert
+    cd "$PROJECT_ROOT"
+    generate_server_config >/dev/null
+    local f="$STATE_DIR/sing-box-server.json"
+    run node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$f"
+    [ "$status" -eq 0 ]
+    grep -q '"type": "vless"' "$f"
+    grep -q '"type": "hysteria2"' "$f"
+    grep -q '"listen_port": 8443' "$f"
+    grep -q "\"password\": \"hy2secret\"" "$f"
+    grep -q 'hy2.crt' "$f"
+    ! grep -q '{{' "$f"
+}
+
+@test "hy2: client config exposes both nodes with manual switch group" {
+    STATE_DIR="$(mktemp -d)"
+    USER_NAME="root"; USER_HOME="$(mktemp -d)"
+    PUBLIC_IP="1.2.3.4"; PORT=443; HY2_PORT=8443; HY2_PASSWORD="hy2secret"
+    UUID="11111111-2222-3333-4444-555555555555"
+    REALITY_PUBLIC_KEY="pub"; SHORT_ID="abcd1234"
+    cd "$PROJECT_ROOT"
+    generate_client_config >/dev/null
+    local f="$STATE_DIR/client.yaml"
+    grep -q 'name: "vps-vpn"' "$f"
+    grep -q 'name: "vps-vpn-hy2"' "$f"
+    grep -q 'type: hysteria2' "$f"
+    grep -q 'port: 8443' "$f"
+    grep -q 'password: hy2secret' "$f"
+    # both nodes must be selectable in the group
+    grep -q '\- "vps-vpn"' "$f"
+    grep -q '\- "vps-vpn-hy2"' "$f"
+    # skip-cert-verify belongs to the self-signed hysteria2 node only
+    [ "$(grep -c 'skip-cert-verify' "$f")" -eq 1 ]
+    # the REALITY private key must never leak
+    ! grep -q 'priv-key-SECRET' "$f"
+}
+
+@test "hy2: check_port_available works for a UDP port" {
+    lsof() { return 1; }
+    ss() { return 1; }
+    export -f lsof ss
+    run check_port_available 8443
+    [ "$status" -eq 0 ]
+}
+
+@test "hy2: configure_firewall allows both TCP and UDP when ufw is active" {
+    FW_LOG="$(mktemp)"; export FW_LOG
+    command() { if [[ "$1" == "-v" && "$2" == "ufw" ]]; then return 0; fi; builtin command "$@"; }
+    ufw() {
+        printf 'ufw %s\n' "$*" >> "$FW_LOG"
+        if [[ "$1" == "status" ]]; then printf 'Status: active\n'; fi
+        return 0
+    }
+    export -f command ufw
+    configure_firewall 443 8443 >/dev/null 2>&1
+    grep -q 'allow 443/tcp' "$FW_LOG"
+    grep -q 'allow 8443/udp' "$FW_LOG"
+}
+
+@test "hy2: generate_credentials creates HY2 creds on first run" {
+    STATE_DIR="$(mktemp -d)/state"
+    PORT=443; PUBLIC_IP=1.2.3.4
+    _stub_crypto_tools
+    generate_credentials >/dev/null 2>&1
+    grep -q '^HY2_PORT=' "$STATE_DIR/state.env"
+    grep -q '^HY2_PASSWORD=' "$STATE_DIR/state.env"
+    # password must be non-trivial
+    local pw; pw=$(grep '^HY2_PASSWORD=' "$STATE_DIR/state.env" | cut -d= -f2-)
+    [ ${#pw} -ge 16 ]
+}
+
+@test "hy2: --hy2-port argument is validated and applied" {
+    parse_args --hy2-port 9443
+    [ "$HY2_PORT" = "9443" ]
+    run parse_args --hy2-port 99999
+    [ "$status" -ne 0 ]
+}
+
+@test "hy2: --no-hy2 disables the second protocol" {
+    parse_args --no-hy2
+    [ "$ENABLE_HY2" -eq 0 ]
 }
 
 
