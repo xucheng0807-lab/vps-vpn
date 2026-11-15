@@ -619,6 +619,31 @@ _write_os_release() {  # $1=dir $2=id $3=ver
     [[ "$output" == *"root"* ]]
 }
 
+@test "env: accepts Ubuntu 26.04 without warning" {
+    local d; d=$(mktemp -d); _write_os_release "$d" ubuntu 26.04
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=amd64; EUID_OVERRIDE=0
+    run check_environment
+    [ "$status" -eq 0 ]
+}
+
+@test "env: accepts unknown future Ubuntu (>=22.04) with a warning but no failure" {
+    local d; d=$(mktemp -d); _write_os_release "$d" ubuntu 28.04
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=amd64; EUID_OVERRIDE=0
+    run check_environment
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"未在"* || "$output" == *"警告"* || "$output" == *"验证"* ]]
+}
+
+@test "env: rejects Ubuntu older than 22.04 (21.10)" {
+    local d; d=$(mktemp -d); _write_os_release "$d" ubuntu 21.10
+    OS_RELEASE_FILE="$d/os-release"
+    ARCH_OVERRIDE=amd64; EUID_OVERRIDE=0
+    run check_environment
+    [ "$status" -ne 0 ]
+}
+
 # --- ensure_dependencies ----------------------------------------------------
 @test "deps: installs missing packages via apt-get" {
     APT_LOG="$(mktemp)"; export APT_LOG
