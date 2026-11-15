@@ -1093,6 +1093,61 @@ EOF
     [ "$ENABLE_HY2" -eq 0 ]
 }
 
+# Regression: upgrading an existing VLESS-only install (state.env predates the
+# Hysteria 2 keys) must backfill HY2 credentials instead of dying on an unbound
+# variable. Failed for real on a VPS during upgrade.
+@test "hy2: upgrade from a legacy state.env backfills HY2 credentials" {
+    STATE_DIR="$(mktemp -d)/state"; mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+    cat > "$STATE_DIR/state.env" <<'EOF'
+UUID=11111111-2222-3333-4444-555555555555
+REALITY_PRIVATE_KEY=legacy-private
+REALITY_PUBLIC_KEY=legacy-public
+SHORT_ID=abcd1234
+PORT=443
+PUBLIC_IP=9.9.9.9
+EOF
+    chmod 600 "$STATE_DIR/state.env"
+    PORT=443; PUBLIC_IP=9.9.9.9; ENABLE_HY2=1
+    unset HY2_PORT HY2_PASSWORD
+    sing-box() { return 0; }
+    export -f sing-box
+    run generate_credentials
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unbound variable"* ]]
+    grep -q '^HY2_PASSWORD=..*' "$STATE_DIR/state.env"
+    grep -q '^HY2_PORT=..*' "$STATE_DIR/state.env"
+    # legacy credentials must be preserved, not rotated
+    grep -q '^UUID=11111111-2222-3333-4444-555555555555' "$STATE_DIR/state.env"
+    grep -q '^REALITY_PRIVATE_KEY=legacy-private' "$STATE_DIR/state.env"
+}
+
+@test "hy2: generate_server_config works after a legacy upgrade" {
+    STATE_DIR="$(mktemp -d)/state"; mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+    cat > "$STATE_DIR/state.env" <<'EOF'
+UUID=11111111-2222-3333-4444-555555555555
+REALITY_PRIVATE_KEY=legacy-private
+REALITY_PUBLIC_KEY=legacy-public
+SHORT_ID=abcd1234
+PORT=443
+PUBLIC_IP=9.9.9.9
+EOF
+    chmod 600 "$STATE_DIR/state.env"
+    PORT=443; PUBLIC_IP=9.9.9.9; ENABLE_HY2=1
+    unset HY2_PORT HY2_PASSWORD
+    sing-box() { return 0; }
+    export -f sing-box
+    generate_credentials >/dev/null 2>&1
+    generate_hy2_cert
+    cd "$PROJECT_ROOT"
+    run generate_server_config
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unbound variable"* ]]
+    local f="$STATE_DIR/sing-box-server.json"
+    [ -f "$f" ]
+    ! grep -q '{{' "$f"
+    grep -q '"type": "hysteria2"' "$f"
+}
+
 
 
 

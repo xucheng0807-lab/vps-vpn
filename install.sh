@@ -268,6 +268,20 @@ generate_credentials() {
         if [[ "${HY2_PORT_EXPLICIT:-0}" -eq 1 && -n "${STATE_HY2_PORT:-}" && "${STATE_HY2_PORT}" != "$HY2_PORT" ]]; then
             save_state
         fi
+        # Backfill Hysteria 2 credentials when upgrading a state.env that
+        # predates them. Legacy installs must not lose VLESS credentials.
+        if [[ "${ENABLE_HY2:-1}" -eq 1 ]]; then
+            local changed=0
+            if [[ -z "${HY2_PORT:-}" ]]; then
+                HY2_PORT="$DEFAULT_HY2_PORT"
+                changed=1
+            fi
+            if [[ -z "${HY2_PASSWORD:-}" ]]; then
+                HY2_PASSWORD=$(openssl rand -hex 16)
+                changed=1
+            fi
+            [[ $changed -eq 1 ]] && save_state
+        fi
         return 0
     fi
 
