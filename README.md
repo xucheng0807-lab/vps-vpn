@@ -1,72 +1,73 @@
 # VPS VPN 一键部署
 
-在 Ubuntu VPS 上一键部署 VLESS + REALITY 与 Hysteria 2 双协议代理，生成可由 Clash Verge（电脑）与 CMFA（Android）导入的 YAML 配置。两个节点在客户端里手动切换。使用官方 sing-box 包与 systemd 服务。
+在 **Ubuntu / Debian** VPS 上一键部署 **VLESS + REALITY (TCP)** 与 **Hysteria 2 (UDP + 端口跳跃)** 双协议代理，自动生成兼容 **Clash Verge（电脑）** 与 **CMFA（Android）** 的 Mihomo YAML 配置（国内直连白名单分流 + Fake-IP 分流 DNS + 证书指纹固定），并自带轻量管理命令 `vps-vpn`。
 
 ## 功能特性
 
-- 一条命令完成安装，自动装好系统依赖与环境，开箱即用
-- 自动校验系统版本/架构/权限，自动用 apt 补齐缺失命令（`curl`、`openssl`、`iproute2`、`ca-certificates`、`lsof` 等）
-- 同时部署 VLESS + REALITY（TCP 443）与 Hysteria 2（UDP 随机高端口）两个协议
-- 客户端节点名直接标明协议（`vps-vpn-vless` / `vps-vpn-hy2`），在 Global 策略组里手动切换
-- 检测到本机 ufw 已启用时自动放行代理 TCP/UDP 端口
-- 自动检测公网 IP 与当前登录用户
-- 自动生成或复用 UUID、REALITY 密钥对、short ID、HY2 密码与自签证书
-- 生成兼容 Mihomo 的客户端 YAML（Clash Verge / CMFA 通用）
-- 支持 root 直接运行，也支持普通用户通过 `sudo` 运行
-- 凭据持久保存，重复执行复用而非轮换
-- 配置改动前备份，校验失败或启动失败时保留/恢复旧配置
+- **一条命令开箱即用**：自动校验系统版本/架构/权限，自动用 `apt` 补齐缺失依赖（`curl`、`openssl`、`iproute2`、`lsof` 与可选 `qrencode`）
+- **双协议协同，兼顾抗封锁与晚高峰速度**：
+  - **VLESS + REALITY（TCP 443）**：安装前自动探测精选无跳转大站（TLS 1.3 + HTTP/2）择低延迟 SNI 写入状态，支持 `--sni` 自定义
+  - **Hysteria 2（UDP 随机高端口 + 默认端口跳跃 `20000-30000`）**：自动通过独立 `nftables`（回退 `iptables`）规则链 + systemd 服务持久化端口跳跃，规避运营商晚高峰单端口 UDP QoS 限速；带 `masquerade` 伪装、正常域名外观自签证书与 SHA-256 `fingerprint` 证书固定（不再裸奔 `skip-cert-verify`）
+- **不影响国内网速，海外与 AI 流量绝不漏直连**：
+  - 客户端采用 MetaCubeX `meta-rules-dat`（`.mrs` 二进制规则集）**白名单分流**：仅大陆域名/IP 与局域网走 `DIRECT`，其余所有海外与新 AI 域名默认兜底走 `Proxy`
+  - **Fake-IP 分流 DNS**：国内走阿里/腾讯 DoH 直连解析，海外走代理侧解析，避免国内直连 Google/Cloudflare DoH 导致的超时卡顿
+  - 默认 **QUIC BBR 自适应**（电脑宽带与手机 4G/5G/Wi-Fi 共用同一份 YAML 不卡顿），并开放 `--hy2-up` / `--hy2-down` 按需开启 Brutal
+  - 节点在 `Proxy` 策略组内**纯手动切换**（零后台探测流量），开启 `profile.store-selected: true` 保证客户端重启不重置选择
+- **电脑 & 手机多种便捷导入**：
+  - 保留 `scp` 本地拉取（零额外端口，适合 AWS/GCP 强安全组）
+  - 内置 `sudo vps-vpn share`：按需开启一次性随机 256-bit Token 下载链接 + 终端二维码（下载达限或 5 分钟自动销毁，UFW 活跃时自动临时放行并在退出时回收）
+  - 内置 `sudo vps-vpn uri`：输出标准 `vless://` 与 `hysteria2://` 链接与二维码，兼顾 Shadowrocket / v2rayN / sing-box
+- **内核网络与安全加固**：
+  - 自动开启 **BBR + FQ**（TCP 加速）与 **16MB Linux UDP 缓冲区**（`net.core.rmem_max` / `wmem_max`，释放 Hysteria 2 吞吐）
+  - 服务端 `route.rules` 默认拦截通过代理访问内网私网与云元数据（`169.254.0.0/16`、`100.64.0.0/10`、`ip_is_private`），并优先 IPv4 解析
+  - 自动校验已装 `sing-box` 版本（`< 1.11` 自动升级）并修复 `/etc/sing-box/config.json` 属主为 `sing-box` 用户
+  - 凭据持久保存，重复执行复用而非轮换；配置变更前备份，校验或启动失败自动回滚
 
 ## 系统要求
 
-- Ubuntu 22.04 及以上 LTS（amd64 / arm64）。22.04、24.04 已实测验证；26.04 及更新的 LTS 会以兼容模式运行（脚本会提示未实测验证，不会阻断）。
+- **Ubuntu 22.04 及以上 LTS**（22.04 / 24.04 已验证）或 **Debian 11 / 12 / 13**（amd64 / arm64）
 - 具有公网 IPv4 地址的 VPS
 - root 权限或 sudo 权限
-- 可访问 Ubuntu 软件源（用于自动安装依赖）；离线或已自备环境时加 `--skip-deps`
+- 可访问系统软件源（离线或已自备环境时加 `--skip-deps`）
 
 ## 快速开始
 
 ### 一键安装
 
-登录你的新 VPS（SSH），复制粘贴这一条，回车即可：
+登录你的 VPS（SSH），复制粘贴执行：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash
 ```
 
-脚本会自动检查环境、安装缺失依赖、部署服务并打印客户端配置路径，无需你手动 `apt install` 任何东西。
-
-> **非 root 用户登录（如 AWS 的 `ubuntu`）也能直接用**，`sudo` 已包含在命令里。
-> 若 `sudo` 提示输入密码，请先执行 `sudo -v` 预授权，再运行上面的命令。
-
-### 安装完成后
-
-脚本最后会打印一段 `安装完成！` 的摘要，里面有：
-
-- 公网地址、VLESS 端口（默认 443）、Hysteria 2 端口（默认随机高端口，安装时打印具体值）
-- 客户端配置文件的绝对路径
-- 一条可直接复制执行的 `scp` 下载命令
-
-把那条 `scp` 命令复制到**你自己的电脑**上执行，就能把 `client.yaml` 下载下来，然后按下面「导入 Clash Verge」操作。
+> **非 root 用户登录（如 AWS 的 `ubuntu` / Debian 的 `admin`）也可直接使用**，`sudo` 已包含在命令里。
+> 若 `sudo` 需要输入密码，请先执行 `sudo -v` 预授权，再运行上面的命令。
 
 ### 自定义参数（可选）
 
-在命令末尾加 `-s -- 参数`。例如：
+在命令末尾加 `-s -- 参数`：
 
 ```bash
 # 手动指定公网 IPv4（自动检测失败时使用）
 curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --ip 1.2.3.4
 
-# 使用自定义 VLESS 端口（默认 443）
-curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --port 8443
+# 自定义 VLESS TCP 端口与 REALITY 伪装域名
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --port 8443 --sni www.apple.com
 
-# 使用自定义 Hysteria 2 端口（默认随机高端口，安装时打印实际值）
-curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --hy2-port 9443
+# 自定义 Hysteria 2 监听端口或端口跳跃范围（默认 20000-30000）
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --hy2-port 35678 --hop-range 25000-35000
+
+# 关闭端口跳跃（云安全组只想开单个 UDP 端口时）
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --no-port-hop
+
+# 按需为 Hysteria 2 启用 Brutal 拥塞控制（必须同时指定上下行 Mbps，按本地真实带宽保守填写）
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --hy2-up 50 --hy2-down 200
 
 # 只部署 VLESS + REALITY，不部署 Hysteria 2
 curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --no-hy2
 
-# 跳过自动安装依赖（已自行备好 curl/openssl 等环境时）
-curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --skip-deps
+# 强制升级 sing-box 到目标版本
+curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --upgrade
 
 # 查看全部参数
 curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | bash -s -- --help
@@ -74,203 +75,113 @@ curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/instal
 
 ### 关于 `bash <(...)` 写法
 
-你可能见过别的脚本用 `bash <(curl -fsSL ...)` 这种写法。它在本项目里**不能加 `sudo`**：
+`sudo` 默认关闭除 stdin/stdout/stderr 以外的文件描述符，因此 `sudo bash <(curl ...)` 会报 `/dev/fd/63: No such file or directory`。本项目统一推荐 `curl -fsSL ... | sudo bash`，在 root 和普通用户 `sudo` 环境下均稳定成立。
+
+## 电脑与手机便捷导入
+
+安装完成后，主客户端配置文件位于 `/root/vps-vpn/client.yaml`（通过 `sudo` 安装时同时在 `/home/<你的用户名>/vps-vpn/client.yaml` 生成可读副本）。该文件**绝不包含 REALITY 私钥**，但仍含节点密码与 UUID，请勿公开分享。
+
+### 方式一：一次性临时分享（最便捷，手机 CMFA 扫码直导）
+
+在 VPS 上按需运行：
 
 ```bash
-# ❌ 错误：sudo 会关闭进程替换的 fd，报 /dev/fd/63: No such file or directory
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh)
-
-# ✅ 仅在「你已经是 root 登录」时可用
-bash <(curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh)
+sudo vps-vpn share
 ```
 
-原因：`sudo` 默认关闭除 stdin/stdout/stderr 以外的所有文件描述符，而 `<(...)` 依赖 `/dev/fd/63` 这类 fd。所以本 README 统一推荐 `curl ... | sudo bash` 这种管道写法，它在任何登录方式下都成立。
+- 自动启动带 **256-bit 随机 Token** 的临时下载链接，并在终端打印 **二维码**；
+- 手机打开 **CMFA** →「配置」→「新建」→「URL」扫码或粘贴链接即可；电脑 **Clash Verge** 同理；
+- 默认下载 **2 次**（电脑 + 手机各一次）或 **5 分钟**后自动关闭并回收临时 UFW 规则，平时零 HTTP 端口暴露。
 
-### 为什么命令里有 `-fsSL` 这些参数
+> **AWS / Lightsail / GCP 提示**：如果你的云厂商控制台安全组没有放行临时分享的随机 TCP 端口，手机将无法直连临时链接。你可以用 `sudo vps-vpn share --port <已放行端口>`，或直接使用下方**方式二**（零额外云安全组端口）。
 
-每个都有实际作用，不是凑数的：
+### 方式二：电脑 `scp` 拉取（任何云安全组下通用）
 
-| 参数 | 作用 |
-| --- | --- |
-| `-f` | HTTP 出错（如 404）直接失败，避免把错误页面当脚本执行 |
-| `-s` | 静默模式，不显示下载进度条 |
-| `-S` | 但出错时仍显示错误信息 |
-| `-L` | 跟随 GitHub 的跳转 |
-| `bash -s --` | 让后面的 `--ip`/`--port` 传给脚本，而不是传给 bash 本身 |
-
-## 客户端配置
-
-安装完成后，客户端配置文件位于：
-
-- 主配置文件（root 拥有）：`/root/vps-vpn/client.yaml`
-- 普通用户副本（若通过 sudo 以普通用户安装）：`/home/<你的登录用户名>/vps-vpn/client.yaml`
-
-`<你的登录用户名>` 就是你的 SSH 登录名（AWS Lightsail 通常是 `ubuntu`，其它厂商可能是 `root`、`debian`、`centos` 等）。脚本安装时会打印「检测到用户: xxx」，照抄即可。
-
-客户端 YAML 包含 UUID、REALITY 公钥与 short ID、HY2 密码，**不包含 REALITY 私钥**。请妥善保管，不要上传到公开仓库。
-
-### 协议与节点
-
-默认部署两个节点，节点名直接标明协议：
-
-| 节点 | 协议 | 传输 | 适用场景 |
-| --- | --- | --- | --- |
-| `vps-vpn-hy2` | Hysteria 2 | UDP 随机高端口 | 弱网/丢包环境下更快 |
-| `vps-vpn-vless` | VLESS + REALITY | TCP 443 | UDP 被运营商封锁时用它 |
-
-`Global` 是普通的 `select` 策略组，两个节点都是它的直接成员，**没有自动故障切换**：流量走哪个协议完全由你在客户端里选，不会在你不知情时被换到另一条链路。
-
-切换方式：Clash Verge / CMFA 的「代理 → Global」里点 `vps-vpn-hy2` 或 `vps-vpn-vless`。
-
-> Hysteria 2 走自签证书，客户端配置里带 `skip-cert-verify: true`；这是 HY2 的常规做法，不影响 REALITY 那一路的 TLS 校验。
-
-### 下载到本地电脑
-
-安装结束时脚本会直接打印一条可复制的 `scp` 命令，形如（把 `<你的登录用户名>` 换成你的 SSH 用户名，`<VPS_IP>` 换成服务器公网 IP）：
+安装结束或运行 `sudo vps-vpn info` 会打印可直接复制的 `scp` 命令：
 
 ```bash
 # 普通用户登录（如 AWS 的 ubuntu）
-scp <你的登录用户名>@<VPS_IP>:/home/<你的登录用户名>/vps-vpn/client.yaml .
+scp <用户名>@<VPS_IP>:/home/<用户名>/vps-vpn/client.yaml .
 
-# 或使用 SSH 密钥（AWS / Lightsail 常用）
-scp -i /path/to/key.pem <你的登录用户名>@<VPS_IP>:/home/<你的登录用户名>/vps-vpn/client.yaml .
+# 使用 SSH 密钥
+scp -i /path/to/key.pem <用户名>@<VPS_IP>:/home/<用户名>/vps-vpn/client.yaml .
 ```
 
-若以 root 安装，则路径为 `/root/vps-vpn/client.yaml`：
+- **导入 Clash Verge（电脑）**：「配置」→「新建」→ 选择「Local（本地）」导入 `client.yaml` → 启用该配置并开启 TUN 模式（或系统代理）。
+- **导入 CMFA（Android）**：若不便使用 `vps-vpn share`，可在同一局域网下把 `client.yaml` 安全传到手机后选择「配置」→「导入」→「本地文件」，启用 Android VPN 即可。
+
+### 方式三：标准单节点 URI 与二维码（辅助客户端）
 
 ```bash
-scp root@<VPS_IP>:/root/vps-vpn/client.yaml .
+sudo vps-vpn uri
 ```
 
-> 若 `scp` 报 `Permission denied`，说明文件属主是 root。先登录 VPS 执行
-> `sudo cp /root/vps-vpn/client.yaml /tmp/ && sudo chown $USER /tmp/client.yaml`，再从本地 `scp` 拉取 `/tmp/client.yaml`。
+输出标准 `vless://` 与 `hysteria2://`（含 `pinSHA256` 证书固定与 `mport` 端口跳跃参数）及终端二维码，适合临时导入 Shadowrocket / v2rayN / sing-box 客户端。
 
-### 导入 Clash Verge（电脑）
+### 节点切换说明
 
-1. 打开 Clash Verge
-2. 「配置」→「导入」→「本地文件」
-3. 选择下载的 `client.yaml`
-4. 启用配置并开启 TUN 模式
+`Proxy` 是普通的 `select` 策略组（无自动测速/无后台探测流量），重启后自动记住上次选择：
 
-### 导入 CMFA（Android）
+| 节点 | 协议 | 传输 | 适用场景 |
+| --- | --- | --- | --- |
+| `vps-vpn-hy2` | Hysteria 2 | UDP（默认 `20000-30000` 端口跳跃） | 晚高峰/跨海丢包环境下吞吐更快，日常优先 |
+| `vps-vpn-vless` | VLESS + REALITY | TCP 443 | 公司/公共 Wi-Fi 封锁 UDP 时手动切到它 |
+| `DIRECT` | 直连 | — | 临时全局直连排障 |
 
-1. 将 `client.yaml` 通过安全方式传输到手机
-2. 打开 CMFA
-3. 「配置」→「导入」→「本地文件」
-4. 选择 `client.yaml`
-5. 启用配置（Android VPN 模式）
+## 装后运维管理（`vps-vpn` 命令）
 
-## 服务管理
+安装脚本会自动部署 `/usr/local/bin/vps-vpn`：
 
 ```bash
-sudo systemctl start sing-box     # 启动
-sudo systemctl stop sing-box      # 停止
-sudo systemctl restart sing-box   # 重启
-sudo systemctl status sing-box    # 状态
-sudo journalctl -u sing-box -f    # 查看日志
+sudo vps-vpn            # 打开交互式中文数字管理菜单
+sudo vps-vpn status     # 查看服务、TCP/UDP 监听、端口跳跃 NAT、BBR、UDP 缓冲与 UFW 状态
+sudo vps-vpn info       # 查看公网地址、端口、HY2 证书指纹与 scp 命令
+sudo vps-vpn share      # 启动一次性临时分享（--port / --timeout / --downloads 可选）
+sudo vps-vpn uri        # 输出 vless:// 与 hysteria2:// 单节点链接及二维码
+sudo vps-vpn update     # 更新 sing-box 内核并校验重启
+sudo vps-vpn rotate     # 备份并轮换 UUID、REALITY 密钥、HY2 密码与自签证书
+sudo vps-vpn uninstall  # 停止服务并彻底清理配置、NAT 规则、含 vps-vpn 备注的 UFW 规则与状态
 ```
+
+## 防火墙与云厂商安全组
+
+- **本机 UFW**：若检测到 UFW 已启用，脚本自动放行 VLESS TCP、HY2 UDP 及端口跳跃 UDP 范围（均打上 `vps-vpn` 备注，绝不改动 SSH 或其他规则；卸载时仅删除带 `vps-vpn` 备注的规则）。
+- **云厂商安全组**（AWS / Lightsail / GCP / 阿里云国际等必须在控制台放行）：
+  - **SSH**：TCP 22（建议仅放行你自己的可信来源）
+  - **VLESS + REALITY**：TCP `443`（或 `--port` 指定的端口）
+  - **Hysteria 2**：UDP `20000-30000`（默认端口跳跃范围，只需 1 条范围规则）；若加了 `--no-port-hop`，则放行安装完成时打印的单个 HY2 UDP 端口
 
 ## 文件与权限
 
 ```text
 /root/vps-vpn/
-  ├─ state.env        # 凭据状态（0600，目录 0700）
-  ├─ client.yaml      # 主客户端配置（0600）
-  └─ backups/         # 配置变更前备份（0700）
+  ├─ state.env               # 凭据与配置状态（0600，目录 0700）
+  ├─ client.yaml             # 主客户端配置（0600）
+  └─ backups/                # 配置与凭据变更前备份（0700）
 
 /etc/sing-box/
-  ├─ config.json      # 服务端配置
-  ├─ hy2.crt          # HY2 自签证书（0644，属主 sing-box）
-  └─ hy2.key          # HY2 私钥（0600，属主 sing-box）
+  ├─ config.json             # 服务端配置（0600，属主 sing-box）
+  ├─ hy2.crt                 # HY2 自签证书（0644，属主 sing-box，CN 为真实伪装域名）
+  └─ hy2.key                 # HY2 私钥（0600，属主 sing-box）
+
+/etc/vps-vpn/port-hop.nft                  # nftables 独立端口跳跃表定义
+/usr/local/libexec/vps-vpn-port-hop        # 端口跳跃 apply/clear 辅助脚本
+/etc/systemd/system/vps-vpn-port-hop.service  # 端口跳跃开机持久化单元
+/etc/sysctl.d/99-bbr.conf                  # BBR + FQ 配置
+/etc/sysctl.d/99-vps-vpn-udp.conf          # 16MB UDP 缓冲区配置
+/usr/local/bin/vps-vpn                     # 装后管理 CLI 与交互菜单
 ```
-
-HY2 证书刻意放在 `/etc/sing-box` 而不是 `/root/vps-vpn`：服务以非特权用户 `sing-box` 运行，读不到 `/root` 下的文件，放错位置会导致 HY2 端口不监听且日志报权限错误。
-
-`state.env` 仅保存受控键值，脚本读取时逐行解析并校验格式，不会 `source` 或执行其中内容。
-
-## 重复安装
-
-脚本支持重复执行：会复用已有的凭据与端口，不会无故轮换。如确需重新生成凭据，请在维护窗口内备份后删除 `/root/vps-vpn/state.env`，再重新运行安装，并替换所有客户端配置。
-
-## 防火墙与云厂商安全组
-
-本机防火墙：**若检测到 ufw 已启用**，脚本会自动执行 `ufw allow <端口>/tcp`（VLESS）与 `ufw allow <端口>/udp`（Hysteria 2）放行代理端口（绝不删除规则、绝不动 SSH、不改动其他端口）；ufw 未启用或未安装则跳过，不擅自开启。
-
-云厂商安全组：脚本**无法**修改，必须由你在控制台手动放行：
-
-- 来自可信来源的 SSH（通常 22）
-- 代理使用的 **TCP** 端口（VLESS，默认 443）
-- 代理使用的 **UDP** 端口（Hysteria 2，默认随机高端口，安装结束会打印具体值）
-
-> UDP 端口最容易漏。AWS / Lightsail / GCP 的安全组（防火墙）默认只放行 TCP，若只开了 TCP 443，客户端里 `vps-vpn-hy2` 节点会一直连不上，表现为选了 HY2 却没网——此时切到 `vps-vpn-vless` 立刻正常。**务必按安装结束时打印的 HY2 端口去放行 UDP**，不要凭记忆填 8443。HY2 调通后建议在 Clash 里看连接详情确认走的是 UDP。
-
-服务启动成功仅表示 sing-box 已在本机就绪，不代表云安全组已放行或客户端可公网连通，请分别核验。
-
-## 故障排除
-
-### 无法自动检测公网 IP
-
-脚本会尝试三个公共服务（ipify / icanhazip / ifconfig.me）。若都失败或结果不一致，用 `--ip` 手动指定：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --ip 1.2.3.4
-```
-
-### 端口被占用
-
-换用其他端口（`--port` 是 VLESS 的 TCP 端口，`--hy2-port` 是 HY2 的 UDP 端口）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/xucheng0807-lab/vps-vpn/main/install.sh | sudo bash -s -- --port 8443
-```
-
-### 服务启动失败
-
-查看日志：
-
-```bash
-sudo journalctl -u sing-box -n 50
-```
-
-脚本在配置校验失败时会保留现有配置不变；在服务启动失败时会尝试恢复备份并提示排查。
-
-## 安全注意事项
-
-- 客户端配置含敏感信息（UUID、公钥等），请妥善保管，勿公开分享
-- 真实凭据、客户端配置、VPS 地址不应进入 Git 仓库
-- 定期更新系统与 sing-box 到最新稳定版本
-
-## 协议性能对比
-
-同一台 VPS（AWS us-west-2）、同一目标 `https://cachefly.cachefly.net/50mb.test`、各跑 3 次的实测下载速度：
-
-| 场景 | VLESS + REALITY | Hysteria 2 | 差异 |
-| --- | --- | --- | --- |
-| 本地直连、无延迟注入 | 1221.9 Mbps | 728.2 Mbps | VLESS 略快（无线损时 TCP 更吃满带宽） |
-| 注入 60 ms 延迟 | 156.1 Mbps | 162.1 Mbps | 基本持平 |
-| 60 ms 延迟 + 3% 丢包 | 97.3 Mbps | 121.3 Mbps | **HY2 快 25%** |
-
-真实 YouTube 播放（4K）测得 `Connection Speed`：VLESS 3561 Kbps，HY2 8003 Kbps（**+125%**）。
-
-结论：带宽充裕、线路干净时两者都能跑满；一旦有丢包，HY2 基于 QUIC 的优势明显。所以日常优先用 `vps-vpn-hy2`，遇到 UDP 被封锁或 HY2 连不上时手动切到 `vps-vpn-vless`。
-
-## 验证状态
-
-- ✅ 脚本语法检查（ShellCheck）
-- ✅ 单元测试（BATS）
-- ✅ 配置生成测试
-- ✅ 错误处理与备份恢复测试
-- ✅ 真实 VPS 部署测试（Ubuntu 24.04.5 LTS / AWS，sing-box 1.14.4）
-- ✅ 服务端链路验证（公网 443 可达、REALITY 伪装证书正常、回环隧道出口 IP 正确）
-- ✅ Hysteria 2 链路验证（UDP 8443 可达、自签证书被服务用户正常读取、客户端握手成功）
-- ✅ 双协议对齐测速（见上方「协议性能对比」）
-- ⏳ Clash Verge 客户端测试（待用户测试）
-- ⏳ CMFA 客户端测试（待用户测试）
-- ⚠️ 已知现象：YouTube 播 AV1（`av01`）编码时，若本机显卡不支持 AV1 硬解则 CPU 软解会掉帧（`Dropped Frames` 可达 ~50%）。这与代理协议无关，属解码能力问题；可在 YouTube 设置里选 h264 播放或安装 h264ify 缓解。
 
 ## 版本说明
 
-脚本固定安装 **sing-box 1.14.4**。请勿降级到 1.10.0 或更低版本：1.10.0 存在 REALITY 缺陷，即使 UUID、公钥、short ID 全部匹配，服务端仍会拒绝所有客户端连接并记录 `REALITY: processed invalid connection`（已在真实 VPS 上复现并确认：同一份配置在 1.10.0 上必然失败，在 1.14.4 上正常工作）。
+脚本默认固定安装 **sing-box 1.14.4**，并在安装阶段校验已装版本必须 **≥ 1.11.0**（低于 1.11 的旧版如 1.10.0 存在 REALITY 拒绝全部合法连接的缺陷，脚本会自动升级）。
+
+## 验证状态
+
+- ✅ 静态语法检查（ShellCheck：覆盖 `install.sh`、内置 `vps-vpn` CLI 及 `vps-vpn-port-hop` 辅助脚本）
+- ✅ 自动化单元与端到端测试（BATS）
+- ✅ 真实二进制配置校验（`sing-box 1.14.4 check` 与 `mihomo 1.19.34 -t`，零警告零错误）
+- ⏳ v2 真实 VPS（Ubuntu / Debian）部署及 Clash Verge / CMFA 实网验收（待你在 VPS 上实测确认）
 
 ## 许可证
 
